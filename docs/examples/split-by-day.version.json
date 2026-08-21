@@ -1,0 +1,65 @@
+{
+  "definition": {
+    "nodes": [
+      {
+        "id": "src",
+        "type": "SOURCE",
+        "name": "partest_source",
+        "connectorInstanceId": "<source connector instance id>",
+        "config": {}
+      },
+      {
+        "id": "tag",
+        "type": "BATCH_TRANSFORM",
+        "name": "Tag each call",
+        "config": {
+          "script": "function transformBatch(records) {\n  // Runs ONCE PER GROUP. If it ran per batch, callSize would be the whole\n  // batch and callGroup would be one day for every record.\n  return records.map(r => ({\n    ...r,\n    callGroup: records[0].day,\n    callSize: records.length\n  }));\n}"
+        }
+      },
+      {
+        "id": "dst",
+        "type": "SINK",
+        "name": "splitdemo_sink",
+        "connectorInstanceId": "<sink connector instance id>",
+        "config": {}
+      }
+    ],
+    "edges": [
+      {
+        "id": "e1",
+        "from": "src",
+        "to": "tag"
+      },
+      {
+        "id": "e2",
+        "from": "tag",
+        "to": "dst"
+      }
+    ]
+  },
+  "chunkingPolicy": {
+    "readFetchSize": 0,
+    "writeBatchSize": 0,
+    "maxBatchBytes": 8388608,
+    "flushInterval": "PT5S",
+    "maxInFlightBatches": 2,
+    "checkpointEveryNBatches": 0
+  },
+  "executionPolicy": {
+    "maxConcurrentChunks": 1,
+    "maxChunksPerPod": 8,
+    "chunkLease": "PT5M",
+    "maxAttemptsPerChunk": 5,
+    "rowsPerChunk": 10000,
+    "maxFailedPercent": 100,
+    "maxFailedRecords": null,
+    "stopRunOnChunkFailure": true
+  },
+  "deliveryPolicy": {
+    "groupSize": 0,
+    "splitScript": "function split(records) {\n  // One call per day. Records sharing a label travel together.\n  return records.map(r => r.day);\n}"
+  },
+  "mode": "FULL_LOAD",
+  "changeNote": "Split by day, one call per group",
+  "_note": "The sink connector instance must use writeMode UPSERT. The batch transform carries the source _id through, so INSERT succeeds once and then rejects every record with a duplicate key."
+}

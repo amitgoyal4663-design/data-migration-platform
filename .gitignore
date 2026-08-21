@@ -1,0 +1,38 @@
+# Build output
+target/
+build/
+dist/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# Node
+node_modules/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+
+# Logs and local run artefacts
+*.log
+logs/
+app.pid
+/backend/apps/dmp-app/*.log
+
+# Credentials — nothing secret belongs in this repo. Connector configs reference
+# secrets as env:NAME and the values arrive from the environment at startup.
+.env
+.env.*
+*.pem
+*.p12
+*.jks
+secrets/
+
+# Editors and OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Local tool settings
+.claude/settings.local.json

@@ -1,0 +1,11 @@
+# Declares this jar's connectors to the platform.
+#
+# The registry discovers connectors through ServiceLoader, so nothing in the platform
+# references these classes by name. Adding a connector never means editing existing code.
+#
+# Four relational databases, one implementation — only the SQL that genuinely differs
+# (upsert syntax, identifier quoting, streaming semantics) lives in JdbcDialect.
+com.dmp.connector.jdbc.Dialects$Postgres
+com.dmp.connector.jdbc.Dialects$MySql
+com.dmp.connector.jdbc.Dialects$SqlServer
+com.dmp.connector.jdbc.Dialects$Oracle

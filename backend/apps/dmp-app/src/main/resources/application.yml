@@ -1,0 +1,231 @@
+# =============================================================================
+# Base configuration, shared by every role.
+#
+# Role selection is by profile (ADR-0004):
+#   --spring.profiles.active=control-plane   REST API, scheduling, orchestration
+#   --spring.profiles.active=worker          plugin loading, DAG execution
+#   --spring.profiles.active=all             both, local development only
+#
+# Nothing is hardcoded: every value below is overridable by environment variable
+# using Spring's relaxed binding (DMP_TENANCY_DEFAULTTENANTSLUG, and so on).
+# =============================================================================
+
+spring:
+  application:
+    name: dmp
+
+  profiles:
+    default: all
+
+  datasource:
+    url: ${DMP_POSTGRES_URL:jdbc:postgresql://localhost:5432/dmp}
+    username: ${DMP_POSTGRES_USER:dmp}
+    password: ${DMP_POSTGRES_PASSWORD:dmp}
+    hikari:
+      # Sized for the control plane. Workers do far less relational work per thread and
+      # override this downward; the number that matters for them is the Mongo pool.
+      maximum-pool-size: ${DMP_POSTGRES_POOL_SIZE:20}
+      minimum-idle: 5
+      connection-timeout: 10000
+      pool-name: dmp-postgres
+
+  jpa:
+    # The schema is owned by Flyway. Hibernate verifies the mapping matches and never
+    # alters anything — an ORM that can change production DDL on startup is a liability.
+    hibernate:
+      ddl-auto: validate
+    # Off deliberately. Open-session-in-view holds a database connection for the whole
+    # request including response serialisation, which turns a slow client into database
+    # pool exhaustion.
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 50
+        order_inserts: true
+        order_updates: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+
+  data:
+    mongodb:
+      # A replica set, not a standalone mongod — including in development. Change streams
+      # need an oplog and the delay queue depends on them (ADR-0002, ADR-0005).
+      uri: ${DMP_MONGO_URI:mongodb://localhost:27017/dmp?replicaSet=rs0}
+      auto-index-creation: false   # created explicitly by MongoIndexInitializer
+
+  quartz:
+    # The JDBC store, not the in-memory one. A schedule must survive a restart, and an in-memory
+    # store also cannot coordinate replicas — every one of them would fire the same trigger.
+    job-store-type: jdbc
+    jdbc:
+      # Flyway owns the QRTZ_* tables (V2__schedules.sql). Letting Quartz create them would put a
+      # schema this application depends on outside the migration history.
+      initialize-schema: never
+    properties:
+      org.quartz.scheduler.instanceId: AUTO
+      org.quartz.scheduler.instanceName: dmp-scheduler
+      org.quartz.jobStore.driverDelegateClass: org.quartz.impl.jdbcjobstore.PostgreSQLDelegate
+      # Row locks in QRTZ_LOCKS mean exactly one replica fires a given trigger. That is leader
+      # election, already built and tested, which would otherwise be bespoke code with a subtle
+      # failure mode (ADR-0010).
+      org.quartz.jobStore.isClustered: true
+      org.quartz.jobStore.clusterCheckinInterval: 15000
+      # How late a firing may be before it counts as a misfire. Generous, because a brief GC pause
+      # on the control plane is not a reason to skip a nightly load.
+      org.quartz.jobStore.misfireThreshold: 60000
+      # Ten, not five. Jobs here are short — a schedule firing does one insert; a chunk status
+      # check does one HTTP call to the destination and returns — but the second kind is bounded by
+      # how long somebody else's org takes to answer, and every chunk parked on a bulk job wants one
+      # every few seconds. Five threads was sized for the first kind alone, and a slow org would
+      # have made parked chunks queue behind each other for no reason.
+      org.quartz.threadPool.threadCount: 10
+
+  jackson:
+    default-property-inclusion: non_null
+
+  threads:
+    virtual:
+      enabled: true
+
+server:
+  port: ${DMP_PORT:8080}
+  error:
+    # Errors are RFC 7807 problem details from GlobalExceptionHandler. Spring's default
+    # error page would leak stack traces and internal paths.
+    include-stacktrace: never
+    include-message: never
+  shutdown: graceful
+
+dmp:
+  tenancy:
+    # Used when no X-Tenant-Id header is present. A development posture only —
+    # a caller-supplied header is not an authorisation decision. Replaced by token
+    # validation when company SSO lands.
+    default-tenant-slug: ${DMP_DEFAULT_TENANT:default}
+    bootstrap-default-tenant: ${DMP_BOOTSTRAP_TENANT:true}
+
+  events:
+    kafka:
+      # Off by default. Kafka carries run *events* — one message per state change and per
+      # chunk — never records; work distribution and checkpointing use MongoDB. A deployment
+      # with no bus simply does not publish, and nothing about migration changes.
+      #
+      # The topic must already exist. The platform never creates one: our service account is
+      # not assumed to have that authority, and a system that creates topics in development
+      # fails on permissions in production at the worst moment.
+      enabled: ${DMP_EVENTS_KAFKA_ENABLED:false}
+      bootstrap-servers: ${DMP_KAFKA_BOOTSTRAP:localhost:9092}
+      topic: ${DMP_EVENTS_TOPIC:dmp.run.events.v1}
+
+  # Per-record trails in OpenSearch. Two separate writers, deliberately: the index carries
+  # identity only (which record, which chunk, what outcome) and is what answers "did row X
+  # arrive"; the log carries the payload too, and is what answers "what did row X look like".
+  #
+  # Both are declared here rather than left to @ConditionalOnProperty's absent-means-off,
+  # because a flag that only exists in a compose file is a flag nobody knows they are missing:
+  # runs completed, the console showed counts, and OpenSearch stayed empty with no diagnostic.
+  #
+  # Off by default so a deployment without a search cluster starts cleanly. The 'all' profile
+  # turns both on — see below.
+  recordindex:
+    enabled: ${DMP_RECORDINDEX_ENABLED:false}
+  recordlog:
+    opensearch:
+      enabled: ${DMP_RECORDLOG_OPENSEARCH_ENABLED:false}
+      url: ${DMP_RECORDLOG_OPENSEARCH_URL:http://localhost:9200}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: alpha
+    tags-sorter: alpha
+
+logging:
+  pattern:
+    # tenantId and requestId come from the MDC, populated by TenantFilter, so every line
+    # emitted while handling a request is attributable without any call site passing them.
+    console: "%d{HH:mm:ss.SSS} %-5level [%X{tenantId:-—}] [%X{requestId:-—}] %logger{36} - %msg%n"
+  level:
+    com.dmp: ${DMP_LOG_LEVEL:INFO}
+
+---
+# -----------------------------------------------------------------------------
+# Control plane: serves the API, owns scheduling and run orchestration.
+# -----------------------------------------------------------------------------
+spring:
+  config:
+    activate:
+      on-profile: control-plane
+
+dmp:
+  role: control-plane
+
+---
+# -----------------------------------------------------------------------------
+# Worker: executes pipelines. No HTTP API beyond actuator.
+# -----------------------------------------------------------------------------
+spring:
+  config:
+    activate:
+      on-profile: worker
+  datasource:
+    hikari:
+      # Workers read definitions rarely and write execution state to MongoDB, so a large
+      # relational pool would be idle connections held against the control plane's budget.
+      maximum-pool-size: 5
+  flyway:
+    # Only the control plane migrates. Concurrent migration from a scaled worker fleet is
+    # a race Flyway's lock survives but which produces alarming logs and slow starts.
+    enabled: false
+
+dmp:
+  role: worker
+
+---
+# -----------------------------------------------------------------------------
+# Local development: both roles in one process.
+# -----------------------------------------------------------------------------
+spring:
+  config:
+    activate:
+      on-profile: all
+
+dmp:
+  role: all
+
+  # On by default locally: the compose stack brings up OpenSearch alongside everything else,
+  # so the useful default is that record trails are there when you go looking for them. The
+  # environment variables still win, so `DMP_RECORDINDEX_ENABLED=false` turns it back off
+  # when you are running the app without the search cluster up.
+  #
+  # Note the index only receives anything for pipelines whose audit level is INDEXED; the
+  # flag makes the writer exist, the policy decides what reaches it.
+  recordindex:
+    enabled: ${DMP_RECORDINDEX_ENABLED:true}
+  recordlog:
+    opensearch:
+      enabled: ${DMP_RECORDLOG_OPENSEARCH_ENABLED:true}
+
+logging:
+  level:
+    com.dmp: DEBUG

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.dmp</groupId>
+        <artifactId>dmp-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>dmp-connector-databricks</artifactId>
+    <name>DMP :: Connector :: Databricks SQL</name>
+    <description>
+        Reads a Databricks SQL warehouse through the Statement Execution API. A statement is
+        submitted asynchronously and polled to completion, then its result is read chunk by chunk —
+        so the warehouse's own division of the result set becomes the run's chunks, and a large
+        query is genuinely parallel rather than a single serial cursor. No JDBC driver, no cluster
+        library, no connection held open across a poll.
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.dmp</groupId>
+            <artifactId>dmp-connector-api</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

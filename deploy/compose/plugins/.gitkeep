@@ -1,0 +1,10 @@
+Third-party connector jars go here, one subdirectory per connector:
+
+  plugins/
+    salesforce-1.2.0/
+      dmp-connector-salesforce-1.2.0.jar
+      <its own dependencies>.jar
+
+Each directory is loaded by its own child-first classloader, so one connector's
+dependencies cannot collide with another's. Restart the worker to pick up a change;
+hot reload is deliberately unsupported.

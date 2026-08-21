@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.dmp</groupId>
+        <artifactId>dmp-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>dmp-engine</artifactId>
+    <name>DMP :: Engine</name>
+    <description>
+        Plans runs into chunks, executes them with back-pressure and checkpointing, and drives the
+        worker claim loop. Depends on the connector API, never on a concrete connector.
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.dmp</groupId>
+            <artifactId>dmp-application</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.dmp</groupId>
+            <artifactId>dmp-connector-runtime</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.dmp</groupId>
+            <artifactId>dmp-transform-api</artifactId>
+        </dependency>
+        <!--
+            The Job interface only. The scheduler itself is wired in the application module,
+            because a worker pod runs jobs' bodies but must never own the schedule.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-quartz</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
+
+        <!-- Test scope only. ConnectorCapabilities reads what a connector declares about itself,
+             so a test of it with no connectors on the classpath would pass by finding nothing —
+             which is exactly the false pass these two caught. -->
+        <dependency>
+            <groupId>com.dmp</groupId>
+            <artifactId>dmp-connector-file</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.dmp</groupId>
+            <artifactId>dmp-connector-mongodb</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.dmp</groupId>
+            <artifactId>dmp-connector-jdbc</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

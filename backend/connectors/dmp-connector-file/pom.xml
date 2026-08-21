@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.dmp</groupId>
+        <artifactId>dmp-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>dmp-connector-file</artifactId>
+    <name>DMP :: Connector :: Files</name>
+    <description>
+        Reads and writes delimited files. Splits by file, so a directory of exports migrates in
+        parallel and resumes from the row it reached.
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.dmp</groupId>
+            <artifactId>dmp-connector-api</artifactId>
+        </dependency>
+        <!--
+            Hand-rolling CSV parsing is a classic mistake: quoted fields containing the delimiter,
+            embedded newlines, and doubled quotes are all common in real exports and all easy to
+            get subtly wrong. Commons CSV is small and correct.
+        -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-csv</artifactId>
+            <version>1.14.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

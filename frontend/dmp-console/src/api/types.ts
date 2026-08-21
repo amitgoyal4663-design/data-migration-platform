@@ -1,0 +1,537 @@
+/**
+ * The API contract, mirrored in TypeScript.
+ *
+ * Hand-written for now. Phase 8 generates these from the backend's OpenAPI document, which is the
+ * reason backend and console share one repository — across two, every API change would open a
+ * window where the spec and its consumer disagree.
+ */
+
+export type PipelineStatus = 'DRAFT' | 'ACTIVE' | 'ARCHIVED'
+export type VersionStatus = 'DRAFT' | 'VALIDATED' | 'PUBLISHED'
+export type PipelineMode = 'FULL_LOAD' | 'INCREMENTAL' | 'STREAMING' | 'CDC'
+export type ConnectorDirection = 'SOURCE' | 'SINK' | 'BOTH'
+export type ConnectorStatus = 'UNTESTED' | 'ACTIVE' | 'FAILED' | 'DISABLED'
+
+export type RunState =
+  | 'CREATED'
+  | 'VALIDATED'
+  | 'PREPARING'
+  | 'RUNNING'
+  | 'PAUSED'
+  | 'STOPPING'
+  | 'FINALIZING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'STOPPED'
+  | 'ARCHIVED'
+
+export type ChunkState =
+  | 'PENDING'
+  | 'RUNNING'
+  // Handed to a system that answers later - a Salesforce bulk job - and put down until it does.
+  // The worker is free; a scheduled check asks the destination and returns the chunk to the pool.
+  | 'WAITING_EXTERNAL'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'ABANDONED'
+  | 'CANCELLED'
+
+export type NodeType =
+  | 'SOURCE'
+  | 'SINK'
+  | 'TRANSFORM'
+  | 'BATCH_TRANSFORM'
+  | 'FILTER'
+  | 'MAPPER'
+  | 'SPLITTER'
+  | 'MERGER'
+  | 'VALIDATION'
+  | 'ERROR_HANDLER'
+  | 'DELAY'
+  | 'RETRY'
+
+export interface Page<T> {
+  content: T[]
+  page: number
+  size: number
+  /** -1 when the store cannot count cheaply. Never render it without checking. */
+  totalElements: number
+  totalPages: number
+  hasNext: boolean
+}
+
+export interface Pipeline {
+  id: string
+  name: string
+  description: string | null
+  folder: string | null
+  tags: string[]
+  status: PipelineStatus
+  publishedVersion: number | null
+  latestVersion: number
+  runnable: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface NodeDefinition {
+  id: string
+  type: NodeType
+  name: string
+  connectorInstanceId: string | null
+  config: Record<string, unknown>
+}
+
+export interface EdgeDefinition {
+  id: string
+  from: string
+  to: string
+  condition: string | null
+}
+
+export interface PipelineDefinition {
+  nodes: NodeDefinition[]
+  edges: EdgeDefinition[]
+}
+
+/**
+ * Flow control.
+ *
+ * There is no write size: the batch *is* the chunk. Two numbers for one nested thing could only
+ * agree by accident — a chunk of 100 with a batch of 1,000 wrote batches of 100 and the setting
+ * meant nothing. Where a destination needs smaller calls than a chunk, that is `DeliveryPolicy`.
+ */
+export interface ChunkingPolicy {
+  /** 0 takes the platform default. Never larger than the chunk — the engine clamps it. */
+  readFetchSize: number
+  /** The real memory guarantee. Record count alone provides none. */
+  maxBatchBytes: number
+  flushInterval: string
+  maxInFlightBatches: number
+  /** 0 lets the engine decide from what the destination declares it can absorb. */
+  checkpointEveryNBatches: number
+}
+
+/** 0 = unlimited, 1 = strictly sequential, N = exactly N chunks in flight across the fleet. */
+export interface ExecutionPolicy {
+  maxConcurrentChunks: number
+  maxChunksPerPod: number
+  chunkLease: string
+  maxAttemptsPerChunk: number
+  /** Source rows one chunk covers. 0 derives it from the read size. */
+  rowsPerChunk: number
+  /**
+   * Share of a chunk's records that may be rejected before the chunk counts as failed.
+   * null means no limit; 0 means any rejection at all fails the chunk.
+   */
+  maxFailedPercent: number | null
+  /** The same limit as an absolute count. null means no limit; 0 means any rejection fails. */
+  maxFailedRecords: number | null
+  /** Whether the first abandoned chunk ends the run, instead of the rest running on regardless. */
+  stopRunOnChunkFailure: boolean
+}
+
+export interface AuditPolicy {
+  level: 'COUNTERS' | 'ERRORS' | 'INDEXED' | 'FULL'
+  /** INDEXED only: index each record's content too, so any field is searchable. */
+  indexPayloads: boolean
+  redactedFields: string[]
+  redactionMode: 'MASK' | 'HASH' | 'DROP'
+  /** Read as seconds (what the API sends); written as an ISO-8601 duration (what it accepts). */
+  retention: string | number
+  /** Payloads kept per distinct fault. 0 keeps every one — and only a stored payload can be replayed. */
+  samplesPerSignature: number
+  /** Ceiling on one stored payload in bytes. 0 stores it however large it is. */
+  maxPayloadBytes: number
+  /**
+   * Whether a rejected record's content is kept, which is what makes it replayable.
+   *
+   * Separate from `level`: that decides whether every record's identity is searchable, this decides
+   * whether a failure's content is stored. Forced off for a Salesforce sink, which reports how many
+   * records a bulk job refused but not which ones.
+   */
+  captureRejectedPayloads: boolean
+  /** Which stages of the work are logged, as distinct from the records they carried. */
+  stageLog: StageLogPolicy
+}
+
+/**
+ * Which stages of the work the platform writes a log for.
+ *
+ * Every other audit setting describes a *record*. None of them describe the *work* — and the work
+ * happens in batches, so the two do not line up. Five hundred records refused in one request is
+ * five hundred rejections and one status code; forty read and thirty-one written is one filter
+ * dropping nine, and no per-record entry names the node that did it.
+ *
+ * All off by default. Counts and timings are tiny; bodies are customer data in a store built to be
+ * searched, which is why they are a fourth switch rather than part of the other three.
+ */
+export interface StageLogPolicy {
+  /** One entry per window of reading: the query, the cursor either side, rows and duration. */
+  reads: boolean
+  /** One entry per pass of the scripts: records in, records out, and how long they took. */
+  transforms: boolean
+  /** One entry per call handed over: records, bytes, duration, and what the destination said. */
+  writes: boolean
+  /** Whether those entries also carry the request and response content, redacted and capped. */
+  bodies: boolean
+}
+
+/** One thing the platform did — a window of reading, a pass of the transforms, or a call out. */
+export interface StageLogEntry {
+  runId: string
+  chunkId: string
+  /** The one read → transform → write cycle this belongs to, as `<chunkId>#<cycle>`. */
+  traceId: string
+  stage: 'READ' | 'TRANSFORM' | 'WRITE'
+  nodeId: string
+  nodeName: string
+  connectorType: string
+  sequence: number
+  attempt: number
+  recordsIn: number
+  /** Differs from `recordsIn` only at TRANSFORM — which is the whole reason that stage is logged. */
+  recordsOut: number
+  bytes: number
+  durationMs: number
+  outcome: 'OK' | 'FAILED'
+  errorCode: string | null
+  errorMessage: string | null
+  query: string | null
+  cursorIn: unknown
+  cursorOut: unknown
+  details: Record<string, unknown> | null
+  request: unknown
+  response: unknown
+  occurredAt: string
+}
+
+/**
+ * How a batch is divided into calls on the sink.
+ *
+ * Separate from the batch size, which decides how much is buffered and how much is redone after a
+ * crash. Before they were separated, reaching an API that wants one record per request meant
+ * setting the batch size to 1 — which also made the engine checkpoint after every single record.
+ *
+ * A group never crosses a batch: two records sharing a label in different batches are two calls.
+ */
+export interface DeliveryPolicy {
+  /** 0 = the whole batch in one call, 1 = one call per record, N = calls of N records. */
+  groupSize: number
+  /** JavaScript returning one group label per record. Mutually exclusive with groupSize. */
+  splitScript: string | null
+}
+
+export interface PipelineVersion {
+  id: string
+  pipelineId: string
+  versionNumber: number
+  status: VersionStatus
+  definition: PipelineDefinition
+  chunkingPolicy: ChunkingPolicy
+  executionPolicy: ExecutionPolicy
+  auditPolicy: AuditPolicy
+  deliveryPolicy: DeliveryPolicy
+  mode: PipelineMode
+  channelType: 'IN_PROCESS' | 'KAFKA'
+  changeNote: string | null
+  createdBy: string | null
+  createdAt: string
+  publishedAt: string | null
+}
+
+export interface PipelineVersionSummary {
+  id: string
+  versionNumber: number
+  status: VersionStatus
+  mode: PipelineMode
+  nodeCount: number
+  changeNote: string | null
+  createdBy: string | null
+  createdAt: string
+  publishedAt: string | null
+}
+
+export interface ValidationIssue {
+  code: string
+  message: string
+  nodeId: string | null
+  edgeId: string | null
+}
+
+export interface ValidationResponse {
+  valid: boolean
+  errors: ValidationIssue[]
+  warnings: ValidationIssue[]
+}
+
+export interface ConnectorInstance {
+  id: string
+  name: string
+  connectorType: string
+  direction: ConnectorDirection
+  config: Record<string, unknown>
+  secretRefs: Record<string, string>
+  status: ConnectorStatus
+  description: string | null
+  lastTestedAt: string | null
+  lastTestError: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** A connector's self-description. The configuration form is rendered from `configSchema`. */
+export interface ConnectorSpec {
+  type: string
+  displayName: string
+  description: string
+  direction: ConnectorDirection
+  configSchema: JsonSchema
+  secretFields: string[]
+  version: string
+}
+
+/** A connector's config schema. `x-dmp-role` marks a field that applies to only one role. */
+export interface JsonSchema {
+  type?: string
+  description?: string
+  properties?: Record<string, JsonSchema>
+  required?: string[]
+  enum?: string[]
+  default?: unknown
+}
+
+export interface RunMetrics {
+  recordsRead: number
+  /** What the transform stage handed to the sink. Differs from read when a script filters or splits. */
+  recordsProduced: number
+  recordsWritten: number
+  recordsFailed: number
+  /** Records a transform deliberately dropped. */
+  recordsFiltered: number
+  bytesRead: number
+  chunksTotal: number
+  chunksCompleted: number
+  chunksFailed: number
+  /** Non-zero on a completed run means records went missing. Surfaced prominently. */
+  unaccountedRecords: number
+  throughputPerSecond: number | null
+}
+
+export interface Run {
+  id: string
+  pipelineId: string
+  pipelineVersionId: string
+  versionNumber: number
+  mode: PipelineMode
+  trigger: string
+  /** The run this one re-attempts. Separate runs on purpose, so the original stays truthful. */
+  retryOf: string | null
+  state: RunState
+  active: boolean
+  terminal: boolean
+  waitingOnExternalSystem: boolean
+  metrics: RunMetrics
+  progress: number | null
+  durationSeconds: number | null
+  /** Values bound into the source's query — the range this run actually covered. */
+  parameters: Record<string, unknown> | null
+  errorCode: string | null
+  errorMessage: string | null
+  triggeredBy: string | null
+  createdAt: string
+  startedAt: string | null
+  endedAt: string | null
+}
+
+export interface Chunk {
+  id: string
+  index: number
+  state: ChunkState
+  spec: Record<string, unknown>
+  assignedTo: string | null
+  leaseExpiresAt: string | null
+  attempt: number
+  errorCode: string | null
+  errorMessage: string | null
+  /** From the checkpoint. Also what a restart-from-the-beginning would re-send. */
+  recordsWritten: number
+  recordsFailed: number
+  /** 0-100, or null when the chunk produced nothing to measure. */
+  rejectionPercent: number | null
+  /** Whether it has a saved position, so resuming differs from starting over. */
+  resumable: boolean
+  /**
+   * Whether the destination took this chunk as a job of its own and still holds a result file.
+   *
+   * True only for a sink that decides asynchronously — a Salesforce bulk job. Every other sink
+   * answers while the batch is being written, so there is no file to fetch and no button to show.
+   */
+  hasDestinationResults: boolean
+  /** The destination's own id for that job, for finding it in the target system. */
+  destinationJobId: string | null
+  startedAt: string | null
+  endedAt: string | null
+}
+
+/** One distinct fault, standing in for however many records hit it. */
+export interface ErrorGroup {
+  signature: string
+  code: string
+  message: string
+  nodeId: string
+  /** Exact, regardless of how many payloads were kept. */
+  count: number
+  /** Payloads available to inspect. Capped by the pipeline's audit policy. */
+  samplesStored: number
+  firstSeenAt: string
+  lastSeenAt: string
+}
+
+export type RetryFrom = 'CHECKPOINT' | 'CHUNK_START'
+export type RetryScope = 'FAILED' | 'FAILED_AND_CANCELLED'
+
+export interface RetryRequest {
+  from?: RetryFrom
+  scope?: RetryScope
+  acknowledgeDuplicates?: boolean
+}
+
+/**
+ * Re-delivery of the records a run rejected. Not a retry: retry re-reads failed chunks from the
+ * source, replay sends stored records that were rejected inside chunks that succeeded.
+ */
+export interface ReplayRequest {
+  /** Send them through the currently published version — for when the fix was in the pipeline. */
+  throughLatestVersion?: boolean
+  /** Required when the pipeline redacts fields, because the stored copies hold placeholders. */
+  acknowledgeRedaction?: boolean
+}
+
+export interface RecordError {
+  chunkId: string
+  nodeId: string
+  seq: number
+  key: string | null
+  code: string
+  message: string
+  payload: Record<string, unknown>
+  occurredAt: string
+}
+
+/** RFC 7807 problem detail, as returned by every failing endpoint. */
+export interface ProblemDetail {
+  type: string
+  title: string
+  status: number
+  detail: string
+  code: string
+  retryable: boolean
+  details?: Record<string, unknown>
+  fieldErrors?: Record<string, string>
+}
+
+/** Where a transformation script runs: on one record, or on the outgoing batch. */
+export type TransformStage = 'RECORD' | 'BATCH' | 'SPLIT'
+
+export interface TransformTestRequest {
+  script: string
+  stage: TransformStage
+  sample: unknown
+}
+
+export interface TransformTestResponse {
+  ok: boolean
+  output: unknown
+  error: string | null
+  elapsedMillis: number
+  /** A plain-language remark about an outcome that reads as a bug but is not, such as a drop. */
+  note: string | null
+}
+
+export interface Schedule {
+  id: string
+  pipelineId: string
+  name: string
+  /** Quartz cron: six or seven fields, not the five-field Unix form. */
+  cronExpression: string
+  /** IANA zone. Required — "3am" is not a moment without one. */
+  timezone: string
+  /** JavaScript computing the range each firing covers. Null means the whole query. */
+  windowScript: string | null
+  enabled: boolean
+  description: string | null
+  lastFiredAt: string | null
+  /** Computed by the scheduler. Null when disabled. */
+  nextFireAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CreateScheduleRequest {
+  pipelineId: string
+  name: string
+  cronExpression: string
+  timezone: string
+  windowScript?: string | null
+  description?: string | null
+}
+
+export interface UpdateScheduleRequest {
+  name: string
+  cronExpression: string
+  timezone: string
+  windowScript?: string | null
+  description?: string | null
+}
+
+/** One firing and the values it would produce, as returned by the preview endpoint. */
+export interface WindowPreview {
+  firings: {
+    firesAt: string
+    parameters: Record<string, string>
+    error: string | null
+  }[]
+}
+
+/**
+ * What one run did with one record.
+ *
+ * Written only by pipelines whose audit level is INDEXED, which is why an empty result means
+ * "no indexed run handled this key" rather than "this record was never migrated".
+ */
+export interface RecordIndexEntry {
+  /** Null where the source has no key of its own. The entry still exists and still counts. */
+  recordKey: string | null
+  pipelineId: string
+  runId: string
+  chunkId: string
+  /** The cycle that carried this record. Joins to the stage log's `traceId`. */
+  traceId: string | null
+  /**
+   * Position within the chunk, and which output of that position this is.
+   *
+   * Together with `chunkId` these identify the entry. `recordKey` does not: a source is free to
+   * hold the same key twice, and two rows that share one are two records, not one.
+   */
+  seq: number
+  ordinal: number
+  outcome: 'WRITTEN' | 'REJECTED' | 'FILTERED'
+  errorCode: string | null
+  occurredAt: string
+}
+
+/** One recorded change to a definition, or one run-lifecycle command. */
+export interface AuditEntry {
+  id: string
+  occurredAt: string
+  actor: string
+  action: string
+  resourceType: string
+  resourceId: string | null
+  summary: string | null
+  before: unknown | null
+  after: unknown | null
+  requestId: string | null
+  sourceIp: string | null
+}

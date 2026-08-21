@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.dmp</groupId>
+        <artifactId>dmp-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>dmp-connector-salesforce</artifactId>
+    <name>DMP :: Connector :: Salesforce Bulk API 2.0</name>
+    <description>
+        Reads and writes Salesforce through Bulk API 2.0. A chunk is one bulk job: records are
+        staged to disk as CSV, uploaded once, and the job is then polled to completion — which is
+        why this connector needs the asynchronous half of the SPI that a database connector never
+        touches. Per-record outcomes are fetched from the job's own failed-results file, so a
+        rejection names the record Salesforce refused rather than only the count.
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.dmp</groupId>
+            <artifactId>dmp-connector-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-csv</artifactId>
+            <version>1.14.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>
