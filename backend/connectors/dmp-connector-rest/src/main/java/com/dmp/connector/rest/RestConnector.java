@@ -216,6 +216,13 @@ public class RestConnector implements Source, Sink {
     // -------------------------------------------------------------------- sink
 
     @Override
+    public boolean sendsBatchAsSinglePayload() {
+        // Agrees with the session's own capabilities, and is here so the same question can be
+        // answered without connecting to anything.
+        return true;
+    }
+
+    @Override
     public SinkSession openSink(ConnectorContext context) {
         RestConfig config = RestConfig.from(context);
 

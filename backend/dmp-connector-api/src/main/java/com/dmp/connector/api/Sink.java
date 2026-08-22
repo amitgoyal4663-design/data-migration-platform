@@ -77,6 +77,23 @@ public interface Sink extends Connector {
         return true;
     }
 
+    /**
+     * Whether this sink can send a batch as one payload, asked without opening a session.
+     *
+     * <p>The same fact {@link SinkSession.Capabilities#sendsBatchAsSinglePayload()} carries, and it
+     * must agree with it. It exists separately because the question is sometimes asked when there
+     * is no session and must not cause one to be opened — publish-time validation, and a dry run,
+     * where opening the real destination is precisely what is being avoided.
+     *
+     * <p>Defaults to false, so a connector built outside this repository is assumed not to accept
+     * an envelope until it says so. The safe direction: refusing an envelope a sink would have
+     * taken is a visible error, while accepting one it cannot use produces a batch transform that
+     * silently has no effect.
+     */
+    default boolean sendsBatchAsSinglePayload() {
+        return false;
+    }
+
     interface SinkSession extends AutoCloseable {
 
         Capabilities capabilities();

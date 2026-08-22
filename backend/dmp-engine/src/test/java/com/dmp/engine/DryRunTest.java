@@ -37,7 +37,7 @@ class DryRunTest {
     @Test
     @DisplayName("accepts every record and says what it would have written")
     void acceptsEverything() {
-        Sink.SinkSession session = new DryRunSink(spec()).openSink(context());
+        Sink.SinkSession session = new DryRunSink(sink()).openSink(context());
 
         RecordBatch batch = RecordBatch.of(List.of(
                 DataRecord.of(Json.newObject().put("id", 1), 1),
@@ -57,7 +57,7 @@ class DryRunTest {
     @Test
     @DisplayName("commits synchronously, so no chunk is parked waiting for a verdict")
     void neverParksAChunk() {
-        Sink.SinkSession session = new DryRunSink(spec()).openSink(context());
+        Sink.SinkSession session = new DryRunSink(sink()).openSink(context());
 
         // An asynchronous commit would leave every chunk in WAITING_EXTERNAL, polling a
         // destination that was never asked anything and will never answer.
@@ -66,11 +66,23 @@ class DryRunTest {
     }
 
     @Test
+    @DisplayName("answers the envelope question the way the real destination would")
+    void borrowsTheRealCapabilities() {
+        // The bug this exists to prevent: the stand-in declared it could not take a batch as one
+        // payload, so a dry run failed a pipeline whose batch transform returns one envelope —
+        // reporting a configuration error, naming the real connector, for a rule it does not have.
+        DryRunSink dry = new DryRunSink(sink());
+
+        assertThat(dry.sendsBatchAsSinglePayload()).isTrue();
+        assertThat(dry.openSink(context()).capabilities().sendsBatchAsSinglePayload()).isTrue();
+    }
+
+    @Test
     @DisplayName("describes itself as the destination it rehearses, not as the stand-in")
     void borrowsTheRealSpec() {
         // A stage log reading "wrote to dry-run" would name the mechanism instead of the thing
         // being tested, and the timeline of a rehearsal should be readable as the real one.
-        assertThat(new DryRunSink(spec()).spec().type()).isEqualTo("salesforce");
+        assertThat(new DryRunSink(sink()).spec().type()).isEqualTo("salesforce");
     }
 
     @Test
@@ -99,9 +111,32 @@ class DryRunTest {
 
     // ------------------------------------------------------------------ setup
 
-    private static ConnectorSpec spec() {
-        return new ConnectorSpec("salesforce", "Salesforce", "The real one",
-                ConnectorSpec.Direction.SINK, Json.emptyObject(), java.util.Set.of(), "1.0.0");
+    /**
+     * A stand-in for the real destination, which declares it takes a batch as one payload.
+     *
+     * <p>True of Kafka and of REST, and the reason this matters: the dry run must answer that
+     * question the way the destination would, or it rejects a batch transform the real run accepts.
+     */
+    private static Sink sink() {
+        return new Sink() {
+            @Override
+            public ConnectorSpec spec() {
+                return new ConnectorSpec("salesforce", "Salesforce", "The real one",
+                        ConnectorSpec.Direction.SINK, Json.emptyObject(), java.util.Set.of(),
+                        "1.0.0");
+            }
+
+            @Override
+            public boolean sendsBatchAsSinglePayload() {
+                return true;
+            }
+
+            @Override
+            public SinkSession openSink(ConnectorContext context) {
+                throw new AssertionError(
+                        "A dry run must never open the real destination — that is the whole point");
+            }
+        };
     }
 
     private static ConnectorContext context() {

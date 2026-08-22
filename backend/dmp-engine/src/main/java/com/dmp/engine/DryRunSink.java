@@ -37,27 +37,45 @@ final class DryRunSink implements Sink {
      * rehearses rather than in terms of this class. A stage log reading "wrote to dry-run" would
      * name the mechanism instead of the thing being tested.
      */
-    private final ConnectorSpec spec;
+    /**
+     * The destination this stands in for.
+     *
+     * <p>Held whole rather than reduced to its spec, because every question the engine asks a sink
+     * without opening it must be answered the way the real one would answer it. Inventing those
+     * answers is not a smaller version of the destination, it is a different destination — and a
+     * rehearsal against a different destination proves nothing.
+     *
+     * <p>That is not hypothetical: this class first declared that it could not take a batch as one
+     * payload, while Kafka and REST both can. A dry run then failed a pipeline whose batch
+     * transform returns one envelope — reporting a configuration error, naming the real connector,
+     * for a rule the real connector does not have.
+     */
+    private final Sink real;
 
-    DryRunSink(ConnectorSpec spec) {
-        this.spec = spec;
+    DryRunSink(Sink real) {
+        this.real = real;
     }
 
     @Override
     public ConnectorSpec spec() {
-        return spec;
+        return real.spec();
+    }
+
+    @Override
+    public boolean sendsBatchAsSinglePayload() {
+        return real.sendsBatchAsSinglePayload();
     }
 
     /**
-     * No, whatever the real sink says.
+     * Whatever the real sink says.
      *
-     * <p>Splitting a batch into smaller calls exists to narrow down which record a destination
-     * refused. Nothing is refused here, so dividing the batch would produce more entries saying the
-     * same thing and make the rehearsal's timeline differ from the real run's for no reason.
+     * <p>Answering "no" here would have been defensible on its own terms — nothing is refused, so
+     * splitting the batch narrows nothing down — but it would change the shape of the rehearsal's
+     * delivery groups, and the timeline of a dry run is read as a prediction of the real one.
      */
     @Override
     public boolean supportsPerRecordDelivery() {
-        return false;
+        return real.supportsPerRecordDelivery();
     }
 
     @Override
@@ -67,13 +85,15 @@ final class DryRunSink implements Sink {
             @Override
             public Capabilities capabilities() {
                 // Idempotent and synchronous, both trivially true of doing nothing. Declaring an
-                // asynchronous commit would park every chunk waiting for a verdict never coming.
+                // asynchronous commit would park every chunk waiting for a verdict never coming —
+                // so these two are the stand-in's own answers, and they are the only two that are.
                 //
-                // The batch sizes are the engine's own defaults rather than the real sink's. A
-                // rehearsal that borrowed the destination's preferred size would report batch
-                // counts the real run reproduces, which reads as more confirmation than a dry run
-                // is entitled to give — nothing here was negotiated with a destination.
-                return new Capabilities(true, null, false, false, false, false, 0, 500);
+                // Everything else is the real destination's, asked without opening it. Whether a
+                // batch can be sent as one payload decides whether a batch transform's envelope is
+                // accepted or rejected as a configuration error, and a rehearsal that answers that
+                // differently from the real run is worse than no rehearsal.
+                return new Capabilities(true, null, false, false, false,
+                        real.sendsBatchAsSinglePayload(), 0, 500);
             }
 
             @Override
@@ -81,7 +101,7 @@ final class DryRunSink implements Sink {
                 ObjectNode details = Json.newObject();
                 details.put("dryRun", true);
                 details.put("wouldHaveWritten", batch.size());
-                details.put("destination", spec.type());
+                details.put("destination", real.spec().type());
                 return new WriteResult(batch.size(), 0, batch.totalBytes(), java.util.List.of(), details);
             }
         };

@@ -174,7 +174,7 @@ public class ChunkExecutor {
         // know a rehearsal is different from a delivery — the batching, the delivery groups, the
         // retries and the stage log are the real ones, which is what makes the rehearsal worth
         // anything.
-        Sink sink = pipeline.dryRun() ? new DryRunSink(realSink.spec()) : realSink;
+        Sink sink = pipeline.dryRun() ? new DryRunSink(realSink) : realSink;
 
         long read = 0;
         long produced = 0;
