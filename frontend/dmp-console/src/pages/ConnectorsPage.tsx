@@ -118,6 +118,7 @@ export function ConnectorsPage() {
                     <ConnectorStatusChip
                       status={instance.status}
                       error={instance.lastTestError}
+                      lastTestedAt={instance.lastTestedAt}
                       testing={test.isPending && test.variables === instance.id}
                     />
                   </TableCell>
@@ -199,10 +200,20 @@ export function ConnectorsPage() {
 function ConnectorStatusChip({
   status: state,
   error,
+  lastTestedAt,
   testing,
 }: {
   status: ConnectorStatus
   error: string | null
+  /**
+   * When the status was last established.
+   *
+   * Shown because the status is a claim about the past, not about now. ACTIVE means a test passed
+   * at some point — possibly weeks ago, against a system that has since moved, had its credentials
+   * rotated, or been firewalled off. Nothing re-verifies it, so a green chip on its own invites
+   * exactly the wrong conclusion: that the connection works.
+   */
+  lastTestedAt?: string | null
   /**
    * A test is in flight right now.
    *
@@ -231,7 +242,19 @@ function ConnectorStatusChip({
     FAILED: { color: status.critical, label: 'Failed' },
     DISABLED: { color: muted, label: 'Disabled' },
   }
-  const { color, label } = appearance[state]
+  let { color, label } = appearance[state]
+
+  // A pass old enough to be worthless is drawn as unverified rather than green. Six hours is not
+  // a meaningful boundary in itself — nothing changes at six hours — but any boundary is better
+  // than presenting a three-week-old success as a statement about the present.
+  const testedAt = lastTestedAt ? new Date(lastTestedAt) : null
+  const ageHours = testedAt ? (Date.now() - testedAt.getTime()) / 3_600_000 : null
+  const stale = state === 'ACTIVE' && ageHours !== null && ageHours > 6
+
+  if (stale) {
+    color = muted
+    label = 'Active'
+  }
 
   const chip = (
     <Chip
@@ -242,7 +265,36 @@ function ConnectorStatusChip({
     />
   )
 
-  return error ? <Tooltip title={error}>{chip}</Tooltip> : chip
+  const when = testedAt
+    ? `Last tested ${testedAt.toLocaleString()}`
+    : 'Never tested — the status is a guess'
+
+  // Both, when there is both. The error alone left "when did this break" unanswerable, and the
+  // timestamp alone left the reason a click away.
+  const explanation = error ? `${when}. ${error}` : when
+
+  return (
+    <Tooltip title={explanation}>
+      <Box sx={{ display: 'inline-flex', flexDirection: 'column', gap: 0.25 }}>
+        {chip}
+        {testedAt && (
+          <Typography variant="caption" sx={{ color: muted, fontSize: 10.5, lineHeight: 1.2 }}>
+            {relativeAge(testedAt)}
+          </Typography>
+        )}
+      </Box>
+    </Tooltip>
+  )
+}
+
+/** "4m ago", "3h ago", "12d ago" — enough to judge whether the status still means anything. */
+function relativeAge(when: Date) {
+  const minutes = Math.floor((Date.now() - when.getTime()) / 60_000)
+  if (minutes < 1) return 'just now'
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
 }
 
 function CreateConnectorDialog({
