@@ -58,6 +58,7 @@ public class RunController {
     private final RecordErrorPort recordErrors;
     private final com.dmp.application.port.out.RecordIndexPort recordIndex;
     private final com.dmp.application.port.out.PipelineRepository pipelines;
+    private final com.dmp.application.port.out.PipelineVersionRepository versions;
     private final TenantContext tenantContext;
     private final Clock clock;
 
@@ -68,6 +69,7 @@ public class RunController {
                          RecordErrorPort recordErrors,
                          com.dmp.application.port.out.RecordIndexPort recordIndex,
                          com.dmp.application.port.out.PipelineRepository pipelines,
+                         com.dmp.application.port.out.PipelineVersionRepository versions,
                          TenantContext tenantContext,
                          Clock clock) {
         this.orchestrator = orchestrator;
@@ -77,6 +79,7 @@ public class RunController {
         this.recordErrors = recordErrors;
         this.recordIndex = recordIndex;
         this.pipelines = pipelines;
+        this.versions = versions;
         this.tenantContext = tenantContext;
         this.clock = clock;
     }
@@ -358,8 +361,21 @@ public class RunController {
             @RequestParam(defaultValue = "50") int limit) {
 
         Run run = require(runId);
+
+        // Resolved from the version this run executed, not the pipeline's current one. A run is a
+        // truthful account of what happened, and naming a step after something published later
+        // would attribute a rejection to a node that did not exist when it happened.
+        Map<String, String> nodeNames = versions
+                .findById(run.tenantId(), run.pipelineVersionId())
+                .map(version -> version.definition().nodes().stream()
+                        .collect(java.util.stream.Collectors.toMap(
+                                com.dmp.domain.pipeline.NodeDefinition::id,
+                                com.dmp.domain.pipeline.NodeDefinition::name,
+                                (first, second) -> first)))
+                .orElse(Map.of());
+
         return recordErrors.summariseByRun(run.tenantId(), run.id(), Math.min(limit, 500)).stream()
-                .map(RunDtos.ErrorGroupResponse::from)
+                .map(summary -> RunDtos.ErrorGroupResponse.from(summary, nodeNames))
                 .toList();
     }
 

@@ -514,6 +514,21 @@ export function RunDetailPage() {
 }
 
 /**
+ * The fault, with the wrapper the sandbox added stripped off.
+ *
+ * "Transform ? threw: Error: amount must be positive" is three layers of packaging around four
+ * useful words. The step is now its own column, and the signature normaliser blanked its name
+ * anyway — so the prefix carries nothing. The full text is still in the tooltip, because a
+ * shortened message that hid something would be worse than a long one.
+ */
+function readableCause(message: string) {
+  return message
+    .replace(/^Transform .*? threw:\s*/, '')
+    .replace(/^(Error|TypeError|ReferenceError|RangeError):\s*/, '')
+    .trim() || message
+}
+
+/**
  * A run's rejections, collapsed to the distinct faults behind them.
  *
  * Twenty thousand records failing one rule are one row here with a count beside it. The flat list
@@ -568,6 +583,7 @@ function FailureGroups({
         <TableHead>
           <TableRow>
             <TableCell align="right">RECORDS</TableCell>
+            <TableCell>STEP</TableCell>
             <TableCell>CODE</TableCell>
             <TableCell>CAUSE</TableCell>
             <TableCell align="right">SAMPLES KEPT</TableCell>
@@ -580,6 +596,13 @@ function FailureGroups({
               <TableCell align="right" sx={tabular}>
                 {group.count.toLocaleString()}
               </TableCell>
+              {/*
+                * Which step rejected them. The group has always known — nodeId is part of what it
+                * groups on — but only the message was shown, and the message has the node's name
+                * blanked out of it by the signature normaliser, which cannot tell a constant from
+                * a per-record value. So the reader saw "Transform ? threw" and had to guess.
+                */}
+              <TableCell sx={{ whiteSpace: 'nowrap' }}>{group.node}</TableCell>
               <TableCell>
                 <Typography variant="caption" sx={tabular}>
                   {group.code}
@@ -594,7 +617,7 @@ function FailureGroups({
                   }
                 >
                   <Typography variant="caption" sx={{ ...ellipsis, cursor: 'help' }}>
-                    {group.message}
+                    {readableCause(group.message)}
                   </Typography>
                 </Tooltip>
               </TableCell>

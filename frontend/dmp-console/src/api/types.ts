@@ -555,6 +555,8 @@ export interface ErrorGroup {
   code: string
   message: string
   nodeId: string
+  /** The step's name from the canvas — what somebody called it, and so what they look for. */
+  node: string
   /** Exact, regardless of how many payloads were kept. */
   count: number
   /** Payloads available to inspect. Capped by the pipeline's audit policy. */

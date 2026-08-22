@@ -1159,9 +1159,11 @@ public class ChunkExecutor {
         try {
             return new TransformOutcome(transform.applyRecord(record), false);
         } catch (TransformException e) {
+            // The exception has always carried which node threw; this used to discard it.
             persistRecordErrors(pipeline, split, List.of(new Sink.RecordError(
-                    record.seq(), record.key(), "TRANSFORM_FAILED", e.getMessage(),
-                    record.payload())));
+                            record.seq(), record.key(), "TRANSFORM_FAILED", e.getMessage(),
+                            record.payload())),
+                    e.nodeId() == null ? pipeline.sinkNode().id() : e.nodeId());
             return new TransformOutcome(List.of(), true, e.getMessage());
         }
     }
@@ -1776,8 +1778,22 @@ public class ChunkExecutor {
      * ability to <em>replay</em>; the reason is the cheapest and most valuable thing here, it is
      * one row per distinct fault however many records hit it, and it is never optional.
      */
+    /**
+     * Files rejections against the step that produced them.
+     *
+     * <p>The node was hardcoded to the sink, which is right for a destination's refusal and wrong
+     * for everything else. A transform failure filed under the sink says the destination rejected
+     * a record it never received — and since the group is keyed on the node, every fault in the
+     * pipeline shared one bucket. The console then read "Kafka orders.v1" beside a message thrown
+     * by a validation step three nodes upstream.
+     */
     private void persistRecordErrors(ResolvedPipeline pipeline, Split split,
                                      List<Sink.RecordError> errors) {
+        persistRecordErrors(pipeline, split, errors, pipeline.sinkNode().id());
+    }
+
+    private void persistRecordErrors(ResolvedPipeline pipeline, Split split,
+                                     List<Sink.RecordError> errors, String nodeId) {
         AuditPolicy audit = pipeline.audit();
         boolean keepPayloads = audit.capturesRejectedPayloads();
 
@@ -1790,7 +1806,6 @@ public class ChunkExecutor {
 
         Instant now = clock.instant();
         Instant expiresAt = now.plus(audit.retention());
-        String nodeId = pipeline.sinkNode().id();
 
         // Grouped before anything is written. Twenty thousand records failing one rule are one
         // fault with a count beside it, not twenty thousand documents saying the same sentence —

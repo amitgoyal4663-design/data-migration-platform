@@ -497,6 +497,10 @@ public final class RunDtos {
             @Schema(description = "A representative message, with per-record identifiers replaced")
             String message,
             String nodeId,
+            @Schema(description = "The step's name from the canvas, which is what somebody named "
+                    + "it and therefore what they will look for. Falls back to the node id for a "
+                    + "step that has since been removed from the pipeline.")
+            String node,
             @Schema(description = "Records that hit this fault. Exact, regardless of how many "
                     + "payloads were kept.")
             long count,
@@ -507,11 +511,22 @@ public final class RunDtos {
             Instant lastSeenAt) {
 
         public static ErrorGroupResponse from(RecordErrorPort.SignatureSummary summary) {
+            return from(summary, java.util.Map.of());
+        }
+
+        /**
+         * @param nodeNames canvas id to the name the user gave it, from the version this run
+         *                  executed — resolved by the caller, because the group knows which node
+         *                  rejected the record but not what anybody called it
+         */
+        public static ErrorGroupResponse from(RecordErrorPort.SignatureSummary summary,
+                                              java.util.Map<String, String> nodeNames) {
             return new ErrorGroupResponse(
                     summary.signature(),
                     summary.code(),
                     summary.message(),
                     summary.nodeId(),
+                    nodeNames.getOrDefault(summary.nodeId(), summary.nodeId()),
                     summary.count(),
                     summary.samplesStored(),
                     summary.firstSeenAt(),
