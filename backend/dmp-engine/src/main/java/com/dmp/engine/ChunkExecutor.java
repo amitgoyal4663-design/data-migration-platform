@@ -792,18 +792,24 @@ public class ChunkExecutor {
      * perfectly deliverable and the run's own rejection threshold is what decides whether this
      * chunk has failed.
      */
+    /**
+     * @param nodeId the step that failed. The sink for a refused call, and the batch script's own
+     *               node when the script threw — a batch transform filed under the destination
+     *               reads as the destination rejecting a payload it never received, and groups
+     *               with everything else the sink ever refused.
+     */
     private Sink.WriteResult deliveryFailed(ResolvedPipeline pipeline, Split split,
                                             RecordBatch batch, long seqOffset,
                                             StageRecorder stages,
                                             Map<Long, com.fasterxml.jackson.databind.JsonNode> sourceBySeq,
                                             RecordIndexPort.Outcome outcome, String code,
-                                            String message) {
+                                            String message, String nodeId) {
         List<Sink.RecordError> errors = new ArrayList<>(batch.size());
         for (DataRecord record : batch.records()) {
             errors.add(new Sink.RecordError(record.seq(), record.key(), code, message,
                     record.payload()));
         }
-        persistRecordErrors(pipeline, split, errors);
+        persistRecordErrors(pipeline, split, errors, nodeId);
         indexDeliveryFailure(pipeline, split, batch, seqOffset, stages, sourceBySeq, outcome, code,
                 message);
 
@@ -887,7 +893,9 @@ public class ChunkExecutor {
                         batch.totalBytes(), e);
                 return deliveryFailed(pipeline, split, batch, seqOffset, stages, sourceBySeq,
                         RecordIndexPort.Outcome.TRANSFORM_FAILED, "BATCH_TRANSFORM_FAILED",
-                        e.getMessage());
+                        e.getMessage(),
+                        e instanceof TransformException failure && failure.nodeId() != null
+                                ? failure.nodeId() : pipeline.sinkNode().id());
             }
             stages.transform(batchStageStarted, TransformStage.BATCH, batch.size(), batch.size(),
                     batch.totalBytes());
@@ -938,7 +946,9 @@ public class ChunkExecutor {
             stages.failed(StageLogPort.Stage.WRITE, callStarted, batch.size(),
                     batch.totalBytes(), e);
             return deliveryFailed(pipeline, split, batch, seqOffset, stages, sourceBySeq,
-                    RecordIndexPort.Outcome.CALL_FAILED, errorCodeOf(e), e.getMessage());
+                    RecordIndexPort.Outcome.CALL_FAILED, errorCodeOf(e), e.getMessage(),
+                    // The destination's own refusal, so the destination is the step.
+                    pipeline.sinkNode().id());
         }
         stages.write(callStarted, batch, result);
 

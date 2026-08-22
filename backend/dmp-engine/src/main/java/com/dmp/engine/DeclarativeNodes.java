@@ -262,6 +262,15 @@ final class DeclarativeNodes {
         };
     }
 
+    /**
+     * How many broken rules a message names before it summarises the rest.
+     *
+     * <p>Five is enough to see the shape of what is wrong with a record. Beyond that the message
+     * outgrows the stores and the table that hold it, and the truncation would fall at the end —
+     * losing the tail silently rather than saying how much was left.
+     */
+    private static final int MAX_REPORTED_RULES = 5;
+
     // ------------------------------------------------------------ validation
 
     /**
@@ -291,9 +300,22 @@ final class DeclarativeNodes {
                             + onFail + "'", Map.of("nodeId", node.id()));
         }
 
+        // Every rule is evaluated, not just up to the first that fails, and that is the whole
+        // difference between one round trip and several. Stopping at the first meant a record
+        // breaking two rules was only ever reported as breaking one — so the second rule's count
+        // was short by exactly the records the first had already claimed. Somebody fixes what the
+        // report showed, runs ten thousand records again, and meets a fault that was there the
+        // first time.
+        //
+        // The cost is that a group is now a combination of rules rather than a single rule. That
+        // is a fair trade and often the more useful reading: "1,200 records broke both amount and
+        // region" says something about a segment of the source that two separate rows do not.
+        boolean firstOnly = "FIRST".equals(node.config().path("report").asText("ALL"));
+
         StringBuilder script = new StringBuilder(512);
         script.append(HELPERS);
         script.append("function transform(record) {\n");
+        script.append("  var broke = [];\n");
 
         for (JsonNode rule : rules) {
             String field = text(rule, "field");
@@ -307,14 +329,27 @@ final class DeclarativeNodes {
             String label = (name == null || name.isBlank()) ? field + " failed " + check : name;
             JsonNode value = rule.get("value");
 
-            script.append("  if (!(").append(predicate(check, field, value, node)).append(")) ");
-            script.append(onFail.equals("DROP")
-                    // Null drops the record. Counted as filtered, not failed, which is what the
-                    // console then reports — and the difference between the two is exactly what
-                    // somebody reading a run wants to know.
-                    ? "return null;\n"
-                    : "throw new Error(" + quote(label) + ");\n");
+            script.append("  if (");
+            if (firstOnly) {
+                script.append("broke.length === 0 && ");
+            }
+            script.append("!(").append(predicate(check, field, value, node)).append(")) ");
+            script.append("broke.push(").append(quote(label)).append(");\n");
         }
+
+        script.append("  if (broke.length) ");
+        script.append(onFail.equals("DROP")
+                // Null drops the record. Counted as filtered, not failed, which is what the
+                // console then reports — and the difference between the two is exactly what
+                // somebody reading a run wants to know.
+                ? "return null;\n"
+                // Capped, because twenty broken rules on one record produce a message longer than
+                // anything that stores or displays it will keep, and the tail is where truncation
+                // would cut. The count is still exact.
+                : "throw new Error(broke.length > " + MAX_REPORTED_RULES + "\n"
+                        + "      ? broke.slice(0, " + MAX_REPORTED_RULES + ").join('; ') + "
+                        + "'; and ' + (broke.length - " + MAX_REPORTED_RULES + ") + ' more'\n"
+                        + "      : broke.join('; '));\n");
 
         script.append("  return record;\n}\n");
         return script.toString();

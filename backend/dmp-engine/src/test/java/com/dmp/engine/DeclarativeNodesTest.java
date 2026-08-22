@@ -397,6 +397,61 @@ class DeclarativeNodesTest {
         }
 
         @Test
+        @DisplayName("names every rule a record broke, not just the first")
+        void reportsEveryFailure() {
+            // The reason this matters is arithmetic, not tidiness. Stopping at the first meant the
+            // second rule's count was short by exactly the records the first had already claimed —
+            // so somebody fixes what the report showed, runs ten thousand records again, and meets
+            // a fault that was there the first time.
+            assertThatThrownBy(() -> validate("""
+                    {"rules": [
+                      {"name": "amount must be positive", "field": "amount",
+                       "check": "MIN", "value": 1},
+                      {"name": "region must be known", "field": "region",
+                       "check": "ONE_OF", "value": ["EU", "UK"]},
+                      {"name": "email must be present", "field": "email", "check": "REQUIRED"}
+                    ]}
+                    """, """
+                    {"amount": -5, "region": "APAC"}
+                    """))
+                    .isInstanceOf(TransformException.class)
+                    .hasMessageContaining("amount must be positive")
+                    .hasMessageContaining("region must be known")
+                    .hasMessageContaining("email must be present");
+        }
+
+        @Test
+        @DisplayName("stops at the first when asked to")
+        void firstOnlyOnRequest() {
+            assertThatThrownBy(() -> validate("""
+                    {"report": "FIRST",
+                     "rules": [
+                      {"name": "amount must be positive", "field": "amount",
+                       "check": "MIN", "value": 1},
+                      {"name": "region must be known", "field": "region",
+                       "check": "ONE_OF", "value": ["EU"]}
+                    ]}
+                    """, "{\"amount\": -5, \"region\": \"APAC\"}"))
+                    .hasMessageContaining("amount must be positive")
+                    .hasMessageNotContaining("region must be known");
+        }
+
+        @Test
+        @DisplayName("summarises the tail rather than letting the message be truncated")
+        void capsTheList() {
+            String rules = java.util.stream.IntStream.rangeClosed(1, 8)
+                    .mapToObj(i -> "{\"name\": \"rule " + i + "\", \"field\": \"missing"
+                            + i + "\", \"check\": \"REQUIRED\"}")
+                    .collect(java.util.stream.Collectors.joining(","));
+
+            assertThatThrownBy(() -> validate("{\"rules\": [" + rules + "]}", "{}"))
+                    .hasMessageContaining("rule 5")
+                    // Said, rather than cut off at whatever length a store happens to keep.
+                    .hasMessageContaining("and 3 more")
+                    .hasMessageNotContaining("rule 8");
+        }
+
+        @Test
         @DisplayName("is refused at resolution when the check is not one it has")
         void refusesAnUnknownCheck() {
             assertThatThrownBy(() -> DeclarativeNodes.validationScript(node(NodeType.VALIDATION, """
