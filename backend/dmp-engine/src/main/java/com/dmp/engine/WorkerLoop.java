@@ -219,7 +219,16 @@ public class WorkerLoop {
             }
 
             long wait;
-            if (didWork) {
+            // Work in flight counts as busy even when this pass claimed nothing, and that
+            // distinction is worth more than it looks. A pod at its concurrency limit claims
+            // nothing precisely because it is maximally busy — the opposite of idle — and treating
+            // the two alike meant that after every chunk the worker slept the idle interval while
+            // its own slot freed a fraction of a second later.
+            //
+            // Measured on a 51-chunk run: 17.7s of chunk execution inside 261.7s of wall clock,
+            // with fifty gaps of 4.9s. Ninety-three per cent of the migration was a worker asleep
+            // next to work it had already finished.
+            if (didWork || inFlight.get() > 0) {
                 wait = busyPollInterval.toMillis();
                 idleMillis = idlePollInterval.toMillis();   // busy again: forget the backoff
             } else {
