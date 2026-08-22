@@ -178,6 +178,28 @@ export interface Reconciliation {
   generatedAt: string
 }
 
+/**
+ * A few records as the source produced them.
+ *
+ * Payloads are unaltered — the shape somebody is here to see. Normalising them would show the
+ * platform's idea of their data, which is exactly what a preview exists to prevent.
+ */
+export interface SourcePreview {
+  records: Record<string, unknown>[]
+  /**
+   * Every field name seen, in the order first encountered.
+   *
+   * Across all records, not just the first: a source may omit a null field on one row and include
+   * it on the next, and a table built from record one would silently lose the column.
+   */
+  fields: string[]
+  /** What was actually asked, so an empty preview is diagnosable rather than disappointing. */
+  query: string | null
+  durationMillis: number
+  /** The source had more. Without this, hitting the limit and reaching the end look identical. */
+  more: boolean
+}
+
 /** 0 = unlimited, 1 = strictly sequential, N = exactly N chunks in flight across the fleet. */
 export interface ExecutionPolicy {
   maxConcurrentChunks: number

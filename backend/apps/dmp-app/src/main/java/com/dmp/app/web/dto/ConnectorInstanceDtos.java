@@ -173,4 +173,37 @@ public final class ConnectorInstanceDtos {
             @Schema(description = "What the far end allows. Send null to remove the limit.")
             RateLimit rateLimit) {
     }
+
+    /**
+     * A few records as the source produced them.
+     *
+     * <p>Payloads are unaltered. This is the shape somebody is here to see, and normalising it
+     * would show them the platform's idea of their data rather than their data — which is exactly
+     * the mistake a preview exists to prevent.
+     */
+    @Schema(name = "SourcePreviewResponse")
+    public record PreviewResponse(
+            @Schema(description = "The records, exactly as the source produced them")
+            java.util.List<com.fasterxml.jackson.databind.JsonNode> records,
+            @Schema(description = "Union of every field name seen, in the order first encountered. "
+                    + "Computed across all the records because a source is entitled to omit a null "
+                    + "field on one row and include it on the next, and a table drawn from the "
+                    + "first record alone would silently lose the column.")
+            java.util.List<String> fields,
+            @Schema(description = "What was actually asked, in the source's own language, so a "
+                    + "preview that returns nothing is diagnosable rather than disappointing")
+            String query,
+            long durationMillis,
+            @Schema(description = "Whether the source had more to give. Without this, a preview "
+                    + "that hit the limit and one that reached the end of the data look identical.")
+            boolean more) {
+
+        public static PreviewResponse from(com.dmp.engine.SourcePreview.Result result) {
+            java.util.Set<String> fields = new java.util.LinkedHashSet<>();
+            result.records().forEach(record -> record.fieldNames().forEachRemaining(fields::add));
+
+            return new PreviewResponse(result.records(), java.util.List.copyOf(fields),
+                    result.query(), result.durationMillis(), result.more());
+        }
+    }
 }

@@ -14,6 +14,9 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -43,10 +46,14 @@ public class ConnectorInstanceController {
 
     private final com.dmp.engine.ConnectorTester tester;
 
+    private final com.dmp.engine.SourcePreview preview;
+
     public ConnectorInstanceController(ConnectorInstanceService connectors,
-                                       com.dmp.engine.ConnectorTester tester) {
+                                       com.dmp.engine.ConnectorTester tester,
+                                       com.dmp.engine.SourcePreview preview) {
         this.tester = tester;
         this.connectors = connectors;
+        this.preview = preview;
     }
 
     @PostMapping
@@ -131,6 +138,42 @@ public class ConnectorInstanceController {
                     """)
     public ConnectorInstanceDtos.Response test(@PathVariable String id) {
         return ConnectorInstanceDtos.Response.from(tester.test(ConnectorInstanceId.parse(id)));
+    }
+
+    @PostMapping("/{id}/preview")
+    @Operation(summary = "Read a few records, to see what they actually look like",
+            description = """
+                    Answers the question every mapping starts with: what does a record from this
+                    system look like? Reads from the real source with the real credentials and
+                    returns the payloads unaltered.
+
+                    Not a run. Nothing is planned, no chunk exists, no checkpoint is written and
+                    nothing appears in the run history. The session is opened, a few rows are read,
+                    and it is closed — including cancelling any job the source had to submit to
+                    answer, so a form clicked twice does not leave two statements running.
+
+                    Capped at 100 rows. A preview is read to learn the shape of a record, which is
+                    evident from a handful; the cap is there because "preview" invites somebody to
+                    ask for ten thousand and use it as an export.
+                    """)
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Records, possibly none"),
+            @ApiResponse(responseCode = "422", description = "This connector is a destination"),
+            @ApiResponse(responseCode = "503", description =
+                    "The source refused, or is still preparing. Carries the connector's own words.")
+    })
+    public ConnectorInstanceDtos.PreviewResponse preview(
+            @PathVariable String id,
+            @Parameter(description = "Rows to read. Capped at 100.")
+            @RequestParam(defaultValue = "10") int limit,
+            @io.swagger.v3.oas.annotations.parameters.RequestBody(description =
+                    "Values for a parameterised query, exactly as a run would supply them. A "
+                            + "source reading WHERE ts > :from cannot be previewed without them.")
+            @RequestBody(required = false) JsonNode parameters) {
+
+        return ConnectorInstanceDtos.PreviewResponse.from(
+                preview.read(ConnectorInstanceId.parse(id), limit,
+                        com.dmp.common.json.Json.orEmpty(parameters)));
     }
 
     @PostMapping("/{id}/disable")

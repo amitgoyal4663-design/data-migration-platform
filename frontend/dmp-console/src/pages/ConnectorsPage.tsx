@@ -7,6 +7,8 @@ import DialogActions from '@mui/material/DialogActions'
 import DialogContent from '@mui/material/DialogContent'
 import DialogTitle from '@mui/material/DialogTitle'
 import IconButton from '@mui/material/IconButton'
+import PreviewIcon from '@mui/icons-material/TableRowsOutlined'
+import { PreviewDialog } from '@/components/PreviewDialog'
 import MenuItem from '@mui/material/MenuItem'
 import Paper from '@mui/material/Paper'
 import Stack from '@mui/material/Stack'
@@ -47,6 +49,7 @@ export function ConnectorsPage() {
   const remove = useDeleteConnectorInstance()
   const test = useTestConnection()
   const [editing, setEditing] = useState<ConnectorInstance | null>(null)
+  const [previewing, setPreviewing] = useState<ConnectorInstance | null>(null)
   const [creating, setCreating] = useState(false)
 
   if (catalogue.isLoading || instances.isLoading) return <Loading label="Loading connectors" />
@@ -127,6 +130,18 @@ export function ConnectorsPage() {
                     >
                       Test
                     </Button>
+                    {/* Only where there is something to read. A sink has no rows to show, and an
+                        enabled button that always answers "this is a destination" is worse than
+                        an absent one. */}
+                    {instance.direction !== 'SINK' && (
+                      <Button
+                        size="small"
+                        startIcon={<PreviewIcon />}
+                        onClick={() => setPreviewing(instance)}
+                      >
+                        Preview
+                      </Button>
+                    )}
                     <Button size="small" startIcon={<EditIcon />} onClick={() => setEditing(instance)}>
                       Edit
                     </Button>
@@ -168,6 +183,14 @@ export function ConnectorsPage() {
       {creating && <CreateConnectorDialog onClose={() => setCreating(false)} />}
       {editing && (
         <CreateConnectorDialog editing={editing} onClose={() => setEditing(null)} />
+      )}
+      {previewing && (
+        <PreviewDialog
+          open
+          connectorInstanceId={previewing.id}
+          name={previewing.name}
+          onClose={() => setPreviewing(null)}
+        />
       )}
     </>
   )

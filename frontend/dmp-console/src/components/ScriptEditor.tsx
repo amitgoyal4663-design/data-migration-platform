@@ -2,6 +2,7 @@ import Editor from '@monaco-editor/react'
 import Alert from '@mui/material/Alert'
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
+import { PreviewDialog } from '@/components/PreviewDialog'
 import Chip from '@mui/material/Chip'
 import Stack from '@mui/material/Stack'
 import TextField from '@mui/material/TextField'
@@ -24,10 +25,21 @@ export function ScriptEditor({
   script,
   onChange,
   readOnly = false,
+  sourceInstanceId,
+  sourceName,
 }: {
   stage: TransformStage
   script: string
   onChange: (script: string) => void
+  /**
+   * The pipeline's source, when the editor is opened from a designer that has one.
+   *
+   * Given, a real record can be pulled in as the sample. That is the whole difference between
+   * testing a script and testing it against the data it will actually see — every transform
+   * failure worth catching comes from a field that is not the type, name or shape assumed.
+   */
+  sourceInstanceId?: string | null
+  sourceName?: string
   /**
    * Readable but not editable, for a published version.
    *
@@ -42,6 +54,7 @@ export function ScriptEditor({
 
   const [sample, setSample] = useState(DEFAULT_SAMPLE)
   const [sampleError, setSampleError] = useState<string | null>(null)
+  const [previewing, setPreviewing] = useState(false)
 
   const run = () => {
     let parsed: unknown
@@ -119,14 +132,34 @@ export function ScriptEditor({
         slotProps={{ input: { sx: { fontFamily: 'monospace', fontSize: 12.5 } } }}
       />
 
-      <Button
-        variant="outlined"
-        startIcon={<PlayIcon />}
-        onClick={run}
-        disabled={!script.trim() || test.isPending}
-      >
-        {test.isPending ? 'Running…' : 'Try it'}
-      </Button>
+      <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+        <Button
+          variant="outlined"
+          startIcon={<PlayIcon />}
+          onClick={run}
+          disabled={!script.trim() || test.isPending}
+        >
+          {test.isPending ? 'Running…' : 'Try it'}
+        </Button>
+        {sourceInstanceId && (
+          <Button size="small" onClick={() => setPreviewing(true)}>
+            Load a real record
+          </Button>
+        )}
+      </Box>
+
+      {sourceInstanceId && previewing && (
+        <PreviewDialog
+          open
+          connectorInstanceId={sourceInstanceId}
+          name={sourceName ?? 'Source'}
+          onClose={() => setPreviewing(false)}
+          onUseRecord={(record) => {
+            setSample(JSON.stringify(record, null, 2))
+            setSampleError(null)
+          }}
+        />
+      )}
 
       {result && !result.ok && (
         <Alert severity="error" sx={{ '& .MuiAlert-message': { fontSize: 12.5 } }}>

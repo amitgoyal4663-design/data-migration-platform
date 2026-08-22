@@ -578,6 +578,7 @@ function Designer() {
             node={selectedNode}
             readOnly={readOnly}
             connectors={connectors.data?.content ?? []}
+            source={instanceFor('SOURCE')}
             onChange={(changes) =>
               setNodes((current) =>
                 current.map((node) =>
@@ -607,12 +608,20 @@ function Designer() {
 function NodeInspector({
   node,
   connectors,
+  source,
   onChange,
   onDelete,
   readOnly = false,
 }: {
   node: Node
   connectors: import('@/api/types').ConnectorInstance[]
+  /**
+   * The pipeline's source, so a script can be tried against a record it will actually be given.
+   *
+   * Read from the saved definition, which means it appears once the source node has been chosen
+   * and saved — the point at which "what do these records look like" becomes answerable.
+   */
+  source?: import('@/api/types').ConnectorInstance
   onChange: (changes: Record<string, unknown>) => void
   onDelete: () => void
   /**
@@ -666,6 +675,8 @@ function NodeInspector({
             stage={stage}
             script={script}
             readOnly={readOnly}
+            sourceInstanceId={source?.id}
+            sourceName={source?.name}
             onChange={(next) => onChange({ config: { ...config, script: next } })}
           />
         )}

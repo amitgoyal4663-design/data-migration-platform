@@ -25,6 +25,7 @@ import type {
   RateLimit,
   RecordError,
   Reconciliation,
+  SourcePreview,
   RecordSearchCriteria,
   RecordIndexEntry,
   StageLogEntry,
@@ -273,6 +274,30 @@ export function useTestTransform() {
   return useMutation({
     mutationFn: (request: TransformTestRequest) =>
       api.post<TransformTestResponse>('/api/v1/transforms/test', request),
+  })
+}
+
+/**
+ * Reads a few real records from a source.
+ *
+ * A mutation rather than a query: it makes a real call to somebody else's system, and a query
+ * would refetch it on every window focus and cache the answer as though a source were a document.
+ */
+export function usePreviewSource() {
+  return useMutation({
+    mutationFn: ({
+      connectorInstanceId,
+      limit = 10,
+      parameters,
+    }: {
+      connectorInstanceId: string
+      limit?: number
+      parameters?: Record<string, string>
+    }) =>
+      api.post<SourcePreview>(
+        `/api/v1/connector-instances/${connectorInstanceId}/preview?limit=${limit}`,
+        parameters && Object.keys(parameters).length > 0 ? parameters : undefined,
+      ),
   })
 }
 
