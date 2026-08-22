@@ -79,6 +79,7 @@ public class WorkerLoop {
     private final com.dmp.engine.schedule.ExternalJobScheduler externalJobs;
     private final RateLimitGate rateLimits;
     private final EngineMetrics metrics;
+    private final com.dmp.application.port.out.WorkNudge nudges;
     private final Clock clock;
 
     private final String workerId;
@@ -126,6 +127,7 @@ public class WorkerLoop {
                       com.dmp.application.port.out.RateLimiter rateLimiter,
                       com.dmp.connector.runtime.ConnectorRegistry connectors,
                       EngineMetrics metrics,
+                      com.dmp.application.port.out.WorkNudge nudges,
                       Clock clock,
                       @Value("${dmp.worker.id:}") String configuredWorkerId,
                       @Value("${dmp.worker.max-concurrent-chunks:4}") int maxConcurrentChunks,
@@ -141,6 +143,7 @@ public class WorkerLoop {
         this.externalJobs = externalJobs;
         this.rateLimits = new RateLimitGate(rateLimiter, connectors);
         this.metrics = metrics;
+        this.nudges = nudges;
         this.clock = clock;
         this.workerId = configuredWorkerId == null || configuredWorkerId.isBlank()
                 ? defaultWorkerId() : configuredWorkerId;
@@ -238,10 +241,11 @@ public class WorkerLoop {
 
             wait = Math.min(wait, millisUntilDeferredWorkIsDue());
 
-            try {
-                Thread.sleep(wait);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+            // Interruptible, so a chunk finishing elsewhere wakes this pod now rather than at the
+            // end of the interval. Returns early or times out; either way the next pass re-queries
+            // and claims, because a nudge grants nothing.
+            nudges.await(Duration.ofMillis(wait));
+            if (Thread.currentThread().isInterrupted()) {
                 return;
             }
         }
@@ -310,6 +314,12 @@ public class WorkerLoop {
                 } finally {
                     inFlight.decrementAndGet();
                     slots.release();
+                    // Here and nowhere earlier. Ringing the bell as soon as the chunk finished
+                    // executing woke a worker that found nothing: the successor is generated and
+                    // the chunk marked complete inside runChunk, and the slot is released on the
+                    // line above. A nudge before all three is a wasted wake and a wasted query,
+                    // which measured slower than not ringing at all.
+                    nudges.publish();
                 }
             });
         }

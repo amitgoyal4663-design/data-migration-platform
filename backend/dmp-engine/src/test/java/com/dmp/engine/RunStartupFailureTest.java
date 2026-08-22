@@ -96,6 +96,23 @@ class RunStartupFailureTest {
                 externalJobs, GRANTS_EVERYTHING,
                 new com.dmp.connector.runtime.ConnectorRegistry("plugins"),
                 EngineMetrics.NONE,
+                // Sleeps the interval, exactly as a deployment with no bus does. The test's clock
+                // is fixed, so the interval is the only thing keeping the loop from spinning.
+                new com.dmp.application.port.out.WorkNudge() {
+                    @Override
+                    public void publish() {
+                    }
+
+                    @Override
+                    public boolean await(java.time.Duration timeout) {
+                        try {
+                            Thread.sleep(timeout.toMillis());
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                        return false;
+                    }
+                },
                 Clock.fixed(NOW, ZoneOffset.UTC), "worker-1", 4,
                 Duration.ofSeconds(5), Duration.ofMillis(200));
 

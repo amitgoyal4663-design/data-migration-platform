@@ -296,7 +296,7 @@ services:
     command:
       - |
         set -e
-        for topic in dmp.run.events.v1 orders.v1; do
+        for topic in dmp.run.events.v1 dmp.work.available.v1 orders.v1; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 \
             --create --if-not-exists --topic "$$topic" \
             --partitions 3 --replication-factor 1
