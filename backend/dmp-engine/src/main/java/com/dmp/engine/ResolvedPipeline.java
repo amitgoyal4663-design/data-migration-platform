@@ -272,16 +272,25 @@ public record ResolvedPipeline(
      * wider than the executor currently implements.
      */
     private static Optional<TransformSpec> transformSpec(NodeDefinition node) {
-        TransformStage stage = switch (node.type()) {
-            case TRANSFORM -> TransformStage.RECORD;
-            case BATCH_TRANSFORM -> TransformStage.BATCH;
+        // A mapper and a validation node carry configuration rather than a script, and are
+        // compiled into one here. They are transforms in every way that matters to the engine —
+        // the difference is only in who wrote the logic and how — so giving them their own
+        // execution path would duplicate the timeout, the attribution, the stage log and the
+        // dead-letter queue in order to express nothing new.
+        String script = switch (node.type()) {
+            case TRANSFORM, BATCH_TRANSFORM -> node.config().path("script").asText(null);
+            case MAPPER -> DeclarativeNodes.mapperScript(node);
+            case VALIDATION -> DeclarativeNodes.validationScript(node);
             default -> null;
         };
-        if (stage == null) {
+        if (script == null && node.type() != NodeType.TRANSFORM
+                && node.type() != NodeType.BATCH_TRANSFORM) {
             return Optional.empty();
         }
 
-        String script = node.config().path("script").asText(null);
+        TransformStage stage = node.type() == NodeType.BATCH_TRANSFORM
+                ? TransformStage.BATCH : TransformStage.RECORD;
+
         if (script == null || script.isBlank()) {
             throw new DmpException(ErrorCode.VALIDATION_FAILED,
                     "Transform '" + node.name() + "' has no script. Write one, or remove the node.",

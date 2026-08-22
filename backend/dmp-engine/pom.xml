@@ -68,5 +68,17 @@
             <version>${project.version}</version>
             <scope>test</scope>
         </dependency>
+        <!--
+            Test scope only. The engine compiles mapper and validation nodes into scripts, and the
+            only assertion worth making about a generated script is what it does when run — so the
+            tests need the sandbox the application wires in at runtime. Nothing in main depends on
+            it: the engine takes a TransformFactory, and which one is the application's choice.
+        -->
+        <dependency>
+            <groupId>com.dmp</groupId>
+            <artifactId>dmp-transform-graaljs</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 </project>
