@@ -1,6 +1,7 @@
 package com.dmp.app.web;
 
 import com.dmp.app.web.dto.ConnectorInstanceDtos;
+import com.dmp.app.web.dto.RunDtos;
 import com.dmp.app.web.dto.PageResponse;
 import com.dmp.application.common.PageQuery;
 import com.dmp.application.port.out.ConnectorInstanceRepository;
@@ -17,6 +18,7 @@ import org.springframework.http.ResponseEntity;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import com.fasterxml.jackson.databind.JsonNode;
+import java.util.List;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -138,6 +140,16 @@ public class ConnectorInstanceController {
                     """)
     public ConnectorInstanceDtos.Response test(@PathVariable String id) {
         return ConnectorInstanceDtos.Response.from(tester.test(ConnectorInstanceId.parse(id)));
+    }
+
+    @GetMapping("/{id}/parameters")
+    @Operation(summary = "The placeholders this source's query expects",
+            description = "So a preview can ask for exactly the right values instead of failing "
+                    + "with the connector's refusal. Empty for a query with no placeholders, "
+                    + "which is most of them. Costs no connection.")
+    public RunDtos.ParameterNames parameters(@PathVariable String id) {
+        return new RunDtos.ParameterNames(
+                List.copyOf(preview.parameterNames(ConnectorInstanceId.parse(id))));
     }
 
     @PostMapping("/{id}/preview")

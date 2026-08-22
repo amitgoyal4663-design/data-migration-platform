@@ -33,6 +33,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { PipelineNode } from '@/components/PipelineNode'
+import { MapperEditor, ValidationEditor } from '@/components/DeclarativeEditors'
 import { ScriptEditor, STARTER_SCRIPTS } from '@/components/ScriptEditor'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -636,6 +637,9 @@ function NodeInspector({
   const nodeType = node.data.nodeType as NodeType
   const needsConnector = nodeType === 'SOURCE' || nodeType === 'SINK'
   const isScripted = nodeType === 'TRANSFORM' || nodeType === 'BATCH_TRANSFORM'
+  // Configured with a form rather than written. Same width as a script editor: a mapping list
+  // needs the room, and a drawer that changes width as you click between steps is jarring.
+  const isDeclarative = nodeType === 'MAPPER' || nodeType === 'VALIDATION'
   const stage: TransformStage = nodeType === 'BATCH_TRANSFORM' ? 'BATCH' : 'RECORD'
 
   const config = (node.data.config as Record<string, unknown>) ?? {}
@@ -652,7 +656,7 @@ function NodeInspector({
   )
 
   return (
-    <Box sx={{ width: isScripted ? 560 : 340, p: 3 }}>
+    <Box sx={{ width: isScripted || isDeclarative ? 560 : 340, p: 3 }}>
       <Typography variant="h3" sx={{ mb: 0.5 }}>
         {nodeType}
       </Typography>
@@ -690,7 +694,25 @@ function NodeInspector({
           </Button>
         )}
 
-        {!needsConnector && !isScripted && (
+        {nodeType === 'MAPPER' && (
+          <MapperEditor
+            config={config}
+            onChange={(next) => onChange({ config: next })}
+            readOnly={readOnly}
+            sourceInstanceId={source?.id}
+            sourceName={source?.name}
+          />
+        )}
+
+        {nodeType === 'VALIDATION' && (
+          <ValidationEditor
+            config={config}
+            onChange={(next) => onChange({ config: next })}
+            readOnly={readOnly}
+          />
+        )}
+
+        {!needsConnector && !isScripted && !isDeclarative && (
           <Alert severity="info" sx={{ '& .MuiAlert-message': { fontSize: 13 } }}>
             {/*
               Said plainly rather than hidden. A step that silently does nothing is worse than one

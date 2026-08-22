@@ -76,6 +76,21 @@ public class SourcePreview {
     }
 
     /**
+     * The placeholders this source's query expects, if any.
+     *
+     * <p>Asked before reading, so a preview of a parameterised source can offer the right boxes
+     * instead of failing with the connector's refusal. Costs no connection and resolves no
+     * credential — the connector reads them out of its stored configuration.
+     */
+    public java.util.Set<String> parameterNames(ConnectorInstanceId id) {
+        ConnectorInstance instance = instances.get(id);
+        if (!connectors.require(instance.connectorType()).spec().direction().canRead()) {
+            return java.util.Set.of();
+        }
+        return connectors.source(instance.connectorType()).parameterNames(instance.config());
+    }
+
+    /**
      * Reads up to {@code limit} records.
      *
      * @param parameters values for a parameterised query, exactly as a run would supply them —

@@ -285,6 +285,23 @@ export function useTestTransform() {
  * A mutation rather than a query: it makes a real call to somebody else's system, and a query
  * would refetch it on every window focus and cache the answer as though a source were a document.
  */
+/**
+ * The placeholders a source's query expects.
+ *
+ * Asked before previewing, so a parameterised source offers the right boxes rather than failing
+ * with the connector's refusal — which is what it did, and which reads as a broken button.
+ */
+export function useSourceParameters(connectorInstanceId: string | undefined) {
+  return useQuery({
+    queryKey: ['connector-parameters', connectorInstanceId],
+    queryFn: () =>
+      api.get<{ names: string[] }>(
+        `/api/v1/connector-instances/${connectorInstanceId}/parameters`,
+      ),
+    enabled: Boolean(connectorInstanceId),
+  })
+}
+
 export function usePreviewSource() {
   return useMutation({
     mutationFn: ({

@@ -13,11 +13,12 @@ import TableCell from '@mui/material/TableCell'
 import TableHead from '@mui/material/TableHead'
 import TableRow from '@mui/material/TableRow'
 import Tab from '@mui/material/Tab'
+import TextField from '@mui/material/TextField'
 import Tabs from '@mui/material/Tabs'
 import Tooltip from '@mui/material/Tooltip'
 import Typography from '@mui/material/Typography'
 import { useEffect, useState } from 'react'
-import { usePreviewSource } from '@/api/hooks'
+import { usePreviewSource, useSourceParameters } from '@/api/hooks'
 import { ErrorPanel } from '@/components/Feedback'
 import { muted, tabular } from '@/theme'
 
@@ -48,17 +49,24 @@ export function PreviewDialog({
   onUseRecord?: (record: Record<string, unknown>) => void
 }) {
   const preview = usePreviewSource()
+  const parameters = useSourceParameters(open ? connectorInstanceId : undefined)
   const [view, setView] = useState(0)
   const [selected, setSelected] = useState(0)
+  const [values, setValues] = useState<Record<string, string>>({})
+
+  const names = parameters.data?.names ?? []
+  const needsValues = names.some((name) => (values[name] ?? '').trim() === '')
 
   // Fetched on open rather than on mount: this makes a real call to somebody else's system, and a
-  // dialog mounted behind a closed flag would make it on a page nobody asked anything of.
+  // dialog mounted behind a closed flag would make it on a page nobody asked anything of. Held
+  // back entirely while the query still has unfilled placeholders — reading with them missing is
+  // a refusal from the connector, which reads as a broken button rather than a missing value.
   useEffect(() => {
-    if (!open) return
+    if (!open || parameters.isLoading || needsValues) return
     setSelected(0)
-    preview.mutate({ connectorInstanceId, limit: 10 })
+    preview.mutate({ connectorInstanceId, limit: 10, parameters: values })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, connectorInstanceId])
+  }, [open, connectorInstanceId, parameters.isLoading])
 
   const data = preview.data
 
@@ -77,6 +85,42 @@ export function PreviewDialog({
 
       <DialogContent>
         <Stack spacing={2}>
+          {names.length > 0 && (
+            <Stack spacing={1.5}>
+              <Typography variant="body2" sx={{ color: muted }}>
+                This source&apos;s query expects {names.length === 1 ? 'a value' : 'values'} for{' '}
+                {names.map((name) => (
+                  <code key={name}>:{name} </code>
+                ))}
+                — the same ones a run would be started with.
+              </Typography>
+              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                {names.map((name) => (
+                  <TextField
+                    key={name}
+                    label={name}
+                    value={values[name] ?? ''}
+                    onChange={(event) =>
+                      setValues((current) => ({ ...current, [name]: event.target.value }))
+                    }
+                    size="small"
+                    placeholder="5000, or 2026-08-01T00:00:00Z"
+                    sx={{ flex: 1, minWidth: 180 }}
+                  />
+                ))}
+                <Button
+                  variant="outlined"
+                  disabled={needsValues || preview.isPending}
+                  onClick={() =>
+                    preview.mutate({ connectorInstanceId, limit: 10, parameters: values })
+                  }
+                >
+                  Read
+                </Button>
+              </Box>
+            </Stack>
+          )}
+
           {preview.isPending && (
             <Typography variant="body2" sx={{ color: muted }}>
               Reading from the source…
