@@ -76,6 +76,17 @@ public class OperationsDashboard {
      */
     private static final Duration LATE_AFTER = Duration.ofMinutes(30);
 
+    /**
+     * How long a run may sit in one state before the board says so.
+     *
+     * <p>A paused run is somebody's deliberate decision, so it is given a day before being called
+     * out — but not forever, because the commonest fate of a paused run is to be forgotten while
+     * still holding a slot. Any other unfinished state is different: nothing is deciding anything,
+     * so four hours without reaching a terminal state means it is not going to.
+     */
+    private static final Duration PAUSED_TOO_LONG = Duration.ofHours(24);
+    private static final Duration STUCK_AFTER = Duration.ofHours(4);
+
     private final PipelineRepository pipelines;
     private final RunRepository runs;
     private final ScheduleRepository schedules;
@@ -334,8 +345,13 @@ public class OperationsDashboard {
                 .filter(run -> !run.dryRun())
                 .toList();
 
+        // "Running now" means running, not "occupies worker capacity". findActive includes PAUSED
+        // because a paused run still holds its slot — true for concurrency accounting, and wrong
+        // on a board, where it showed four runs somebody paused a fortnight ago under a heading
+        // that says they are happening.
         List<Live> live = active.stream()
                 .filter(run -> !run.dryRun())
+                .filter(run -> run.state() != RunState.PAUSED)
                 .map(run -> new Live(
                         run.id().toString(),
                         pipelineName(tenantId, run.pipelineId()),
@@ -344,7 +360,11 @@ public class OperationsDashboard {
                                 ? run.metrics().progress().getAsDouble() : null,
                         run.metrics().recordsRead(),
                         run.metrics().recordsWritten(),
-                        run.duration(now).map(Duration::toSeconds).orElse(0L)))
+                        // From when the run was created, not from when it started. A run stuck in
+                        // PREPARING has no start time, so measuring from one reported "0m" for
+                        // something that had been going nowhere for an hour.
+                        Duration.between(run.startedAt() == null ? run.createdAt()
+                                : run.startedAt(), now).toSeconds()))
                 .sorted(Comparator.comparing(Live::pipeline))
                 .toList();
 
@@ -373,6 +393,31 @@ public class OperationsDashboard {
                         run.metrics().unaccountedRecords() + " records unaccounted for",
                         "Reached delivery and were neither written nor reported failed",
                         run.endedAt() == null ? run.createdAt() : run.endedAt()));
+            }
+        }
+
+        // A run nobody finished. Paused two weeks ago, or preparing for an hour against a
+        // warehouse that is never going to answer — neither produces a failure, neither appears in
+        // any window of recent activity, and both hold a concurrency slot the whole time. Nothing
+        // else in the platform reports them, which is exactly why they belong here.
+        for (Run run : active) {
+            if (run.dryRun()) {
+                continue;
+            }
+            Instant began = run.startedAt() == null ? run.createdAt() : run.startedAt();
+            Duration held = Duration.between(began, now);
+
+            if (run.state() == RunState.PAUSED && held.compareTo(PAUSED_TOO_LONG) > 0) {
+                attention.add(new Attention(Severity.WARNING,
+                        pipelineName(tenantId, run.pipelineId()), run.id().toString(),
+                        "Paused for " + humanise(held),
+                        "Still holding a slot. Resume it or stop it.", began));
+
+            } else if (run.state() != RunState.PAUSED && held.compareTo(STUCK_AFTER) > 0) {
+                attention.add(new Attention(Severity.CRITICAL,
+                        pipelineName(tenantId, run.pipelineId()), run.id().toString(),
+                        run.state().name().toLowerCase() + " for " + humanise(held),
+                        "No longer making progress, and it will not fail on its own.", began));
             }
         }
 
