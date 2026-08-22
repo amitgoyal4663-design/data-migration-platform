@@ -68,6 +68,15 @@ public class ChunkExecutor {
     private static final Logger log = LoggerFactory.getLogger(ChunkExecutor.class);
 
     /**
+     * How many times one call to a destination is attempted before its group is given up on.
+     *
+     * <p>Small, and about the call rather than the chunk. Anything longer belongs to the chunk's
+     * own attempt budget, which re-reads the source — the expensive thing this exists to avoid.
+     */
+    private static final int SINK_CALL_ATTEMPTS = 3;
+    private static final Duration SINK_CALL_BACKOFF = Duration.ofSeconds(2);
+
+    /**
      * Floor on how often a destination is asked whether it has finished.
      *
      * <p>A connector returning zero — or nothing — must not turn the poll into a hot loop against
@@ -640,6 +649,90 @@ public class ChunkExecutor {
                 new Sink.WriteResult(written, failed, bytesWritten, List.copyOf(errors)), lastSeq);
     }
 
+
+    /**
+     * Calls the destination, retrying the call itself while it is worth retrying.
+     *
+     * <p><b>The call, not the chunk.</b> The batch is already in memory, so a destination that
+     * hiccups costs a short wait and nothing else — no second query against the source, no second
+     * pass of the transforms. That distinction is the whole point: a two-second outage used to
+     * dead-letter five hundred records or, worse, re-read the chunk three times to reach the same
+     * request again.
+     *
+     * <p>Only while the connector says the failure is worth retrying. A 503 or a timeout is the
+     * destination being briefly unwell; a 400 is this payload being unacceptable, and sending it
+     * again unchanged is a waste of the destination's time and the run's.
+     */
+    /** The connector's own classification where it has one, the exception's type otherwise. */
+    private static String errorCodeOf(Throwable failure) {
+        return failure instanceof com.dmp.connector.api.ConnectorException connector
+                ? connector.kind().name()
+                : failure.getClass().getSimpleName();
+    }
+
+    private Sink.WriteResult callSink(Sink.SinkSession sinkSession, RecordBatch batch,
+                                      StageRecorder stages, Split split) {
+        RuntimeException last = null;
+
+        for (int attempt = 1; attempt <= SINK_CALL_ATTEMPTS; attempt++) {
+            stages.sinkCalls++;
+            try {
+                return sinkSession.write(batch);
+            } catch (RuntimeException e) {
+                last = e;
+                boolean worthRetrying = e instanceof com.dmp.connector.api.ConnectorException connector
+                        && connector.isRetryable();
+                if (!worthRetrying || attempt == SINK_CALL_ATTEMPTS) {
+                    throw e;
+                }
+                Duration backoff = SINK_CALL_BACKOFF.multipliedBy(attempt);
+                log.warn("Chunk {} could not write {} record(s) to the destination "
+                                + "(attempt {} of {}): {}. Retrying the call in {}s.",
+                        split.index(), batch.size(), attempt, SINK_CALL_ATTEMPTS,
+                        e.getMessage(), backoff.toSeconds());
+                try {
+                    Thread.sleep(backoff.toMillis());
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+            }
+        }
+        throw last;
+    }
+
+    /**
+     * Records a delivery that failed as a whole, and reports it as this group's result.
+     *
+     * <p>Delivery is the batch script and the call together — the script runs per group,
+     * immediately before it — so a failure in either loses the same records for the same group and
+     * is recorded the same way. What differs is the reason, and that is carried through: a script
+     * that threw and a destination that refused are different problems and a support desk must be
+     * able to tell them apart.
+     *
+     * <p>Written to the dead-letter queue as well as the index, so these records can be replayed
+     * once whatever caused it is fixed. Returned rather than thrown, because the next group may be
+     * perfectly deliverable and the run's own rejection threshold is what decides whether this
+     * chunk has failed.
+     */
+    private Sink.WriteResult deliveryFailed(ResolvedPipeline pipeline, Split split,
+                                            RecordBatch batch, long seqOffset,
+                                            StageRecorder stages,
+                                            Map<Long, com.fasterxml.jackson.databind.JsonNode> sourceBySeq,
+                                            RecordIndexPort.Outcome outcome, String code,
+                                            String message) {
+        List<Sink.RecordError> errors = new ArrayList<>(batch.size());
+        for (DataRecord record : batch.records()) {
+            errors.add(new Sink.RecordError(record.seq(), record.key(), code, message,
+                    record.payload()));
+        }
+        persistRecordErrors(pipeline, split, errors);
+        indexDeliveryFailure(pipeline, split, batch, seqOffset, stages, sourceBySeq, outcome, code,
+                message);
+
+        return new Sink.WriteResult(0, batch.size(), 0, errors);
+    }
+
     /**
      * Divides a batch into the groups the sink will be called with.
      *
@@ -701,7 +794,24 @@ public class ChunkExecutor {
         // reported as read, and the transform API rejects a mismatched array before this point.
         if (transform.hasBatchStage()) {
             Instant batchStageStarted = clock.instant();
-            BatchResult outcome = transform.applyBatch(batch.records());
+            BatchResult outcome;
+            try {
+                outcome = transform.applyBatch(batch.records());
+            } catch (RuntimeException e) {
+                // The group fails, not the chunk. A batch script is part of delivering this group
+                // — it runs per group, immediately before the call — so a script that throws on
+                // one group's records says nothing about the next group's, which may be entirely
+                // different data. Failing the chunk here would re-query the source to re-run a
+                // deterministic script over the same records and get the same exception.
+                //
+                // Unlike a record script this cannot be blamed on one record: it ran over the
+                // whole group, so the whole group is what failed.
+                stages.failed(StageLogPort.Stage.TRANSFORM, batchStageStarted, batch.size(),
+                        batch.totalBytes(), e);
+                return deliveryFailed(pipeline, split, batch, seqOffset, stages, sourceBySeq,
+                        RecordIndexPort.Outcome.TRANSFORM_FAILED, "BATCH_TRANSFORM_FAILED",
+                        e.getMessage());
+            }
             stages.transform(batchStageStarted, TransformStage.BATCH, batch.size(), batch.size(),
                     batch.totalBytes());
 
@@ -740,23 +850,18 @@ public class ChunkExecutor {
         }
 
         Instant callStarted = clock.instant();
-        stages.sinkCalls++;
         Sink.WriteResult result;
         try {
-            result = sinkSession.write(batch);
+            result = callSink(sinkSession, batch, stages, split);
         } catch (RuntimeException e) {
-            // The call the destination refused outright. This is the entry that was missing when a
-            // run reported "40 of 40 rejected" and left nothing anywhere to say what the
-            // destination had objected to.
+            // The destination refused this call and went on refusing it. The group fails; the
+            // chunk does not. Retrying the chunk would re-query the source and re-run every
+            // transform to reach the same call again — which is what it used to do, three times,
+            // for a single failed request.
             stages.failed(StageLogPort.Stage.WRITE, callStarted, batch.size(),
                     batch.totalBytes(), e);
-            // And the records that were in it. Without this they get no index entry at all: the
-            // chunk fails, is retried, and in the meantime a search for any of the five hundred
-            // records in the failed call finds nothing — which reads as "never attempted" when the
-            // truth is "attempted, and the destination refused the whole call". That is the
-            // ordinary way a REST destination fails; only a handful answer record by record.
-            indexFailedCall(pipeline, split, batch, seqOffset, stages, sourceBySeq, e);
-            throw e;
+            return deliveryFailed(pipeline, split, batch, seqOffset, stages, sourceBySeq,
+                    RecordIndexPort.Outcome.CALL_FAILED, errorCodeOf(e), e.getMessage());
         }
         stages.write(callStarted, batch, result);
 
@@ -852,22 +957,25 @@ public class ChunkExecutor {
     }
 
     /**
-     * Marks every record of a call the destination refused outright.
+     * Marks every record of a delivery that failed as a whole.
      *
-     * <p>The ordinary shape of a failing destination: one status for the whole request, no verdict
-     * per record. Before this, those records were indexed nowhere — the exception unwound past
-     * {@link #indexRecords} — so a search for any of them returned nothing at all, and nothing is
-     * how the screen says "we never had this record".
+     * <p>Two ways to get here and one consequence: a batch script that threw over the group, or a
+     * destination that refused the call. Either way none of these records arrived, and before this
+     * existed none of them was recorded anywhere — the exception unwound past indexing, so a
+     * support search for any of them returned nothing, which reads as "we never received it".
      *
-     * <p>Best-effort on purpose. The write has already failed and is about to be rethrown; if the
-     * index is unreachable too, the chunk's own failure is the one worth keeping. Throwing from
-     * here would replace a message naming the destination's status with one naming OpenSearch.
+     * <p>The reason is carried through rather than flattened. A script that broke and a
+     * destination that refused are different problems with different fixes, and the code and the
+     * message are what tell them apart.
+     *
+     * <p>Best-effort: the delivery has already failed and is about to be reported. If the index is
+     * unreachable too, the delivery's own failure is the one worth keeping.
      */
-    private void indexFailedCall(ResolvedPipeline pipeline, Split split, RecordBatch batch,
-                                 long seqOffset, StageRecorder stages,
-                                 Map<Long, com.fasterxml.jackson.databind.JsonNode> sourceBySeq,
-                                 RuntimeException failure) {
-
+    private void indexDeliveryFailure(ResolvedPipeline pipeline, Split split, RecordBatch batch,
+                                      long seqOffset, StageRecorder stages,
+                                      Map<Long, com.fasterxml.jackson.databind.JsonNode> sourceBySeq,
+                                      RecordIndexPort.Outcome outcome, String code,
+                                      String message) {
         if (!pipeline.audit().level().indexesEveryRecord() || batch.isEmpty()) {
             return;
         }
@@ -876,26 +984,14 @@ public class ChunkExecutor {
         Instant now = clock.instant();
         Instant expiresAt = now.plus(audit.indexRetention());
         boolean withPayloads = audit.indexesPayloads();
-        String code = failure instanceof com.dmp.connector.api.ConnectorException connector
-                ? connector.kind().name()
-                : failure.getClass().getSimpleName();
-        // The same sentence the chunk will fail with, against each record that was in the call, so
-        // the answer is on the record rather than only on the chunk somebody has to find first.
-        String message = failure.getMessage();
 
         List<RecordIndexPort.RecordIndexEntry> entries = new ArrayList<>(batch.size());
         for (DataRecord record : batch.records()) {
             entries.add(new RecordIndexPort.RecordIndexEntry(
-                    split.tenantId(),
-                    pipeline.version().pipelineId(),
-                    split.runId(),
-                    split.id(),
-                    stages.traceId(),
-                    seqOffset + record.seq(),
-                    record.ordinal(),
+                    split.tenantId(), pipeline.version().pipelineId(), split.runId(), split.id(),
+                    stages.traceId(), seqOffset + record.seq(), record.ordinal(),
                     record.key() == null || record.key().isBlank() ? null : record.key(),
-                    RecordIndexPort.Outcome.CALL_FAILED,
-                    code,
+                    outcome, code,
                     withPayloads
                             ? Redaction.apply(
                                     Payloads.truncate(record.payload(), audit.maxPayloadBytes()),
@@ -907,16 +1003,14 @@ public class ChunkExecutor {
                                             audit.maxPayloadBytes()),
                                     audit)
                             : null,
-                    message,
-                    now,
-                    expiresAt));
+                    message, now, expiresAt));
         }
 
         try {
             recordIndex.indexAll(entries);
         } catch (RuntimeException indexFailure) {
-            log.warn("Chunk {} of run {} could not record the {} record(s) in the call the "
-                            + "destination refused. They will have no index entry for this attempt.",
+            log.warn("Chunk {} of run {} could not record the {} record(s) in a delivery that "
+                            + "failed. They will have no index entry for this attempt.",
                     split.index(), split.runId(), batch.size(), indexFailure);
         }
     }
@@ -1396,7 +1490,22 @@ public class ChunkExecutor {
             }
             submit(StageLogPort.Stage.TRANSFORM, nodeIdsFor(stage), nodeNamesFor(stage), null,
                     transformsRun++, in, out, bytes, startedAt, StageLogPort.Outcome.OK,
-                    null, null, null, null, null, null, null, null);
+                    null, null, null, null, null, whichStage(stage), null, null);
+        }
+
+        /**
+         * Which transform stage an entry came from, for anyone reading the log.
+         *
+         * <p>Both stages are TRANSFORM entries and nothing distinguished them, so a console could
+         * not tell the pass over every record from the pass over one delivery group — which is the
+         * difference between "this ran once for the chunk" and "this ran once per call, and this
+         * one is call two of three".
+         */
+        private com.fasterxml.jackson.databind.JsonNode whichStage(TransformStage stage) {
+            com.fasterxml.jackson.databind.node.ObjectNode details =
+                    com.dmp.common.json.Json.newObject();
+            details.put("transformStage", stage.name());
+            return details;
         }
 
         /**
@@ -1446,7 +1555,7 @@ public class ChunkExecutor {
                     nodeNamesFor(TransformStage.RECORD), null,
                     transformsRun++, in, out, bytes,
                     now.minusNanos(elapsedNanos), StageLogPort.Outcome.OK,
-                    null, null, null, null, null, null, null, null);
+                    null, null, null, null, null, whichStage(TransformStage.RECORD), null, null);
         }
 
         /** One call handed to the destination, whatever it made of the records inside it. */
@@ -1459,8 +1568,16 @@ public class ChunkExecutor {
             if (!logsWrites()) {
                 return;
             }
+            // In is what was handed over, out is what the destination kept. They differ when it
+            // refused some, and that difference is the whole reason to look at a write: a call
+            // reporting "250 records" for a batch of which a hundred and ten were refused is true
+            // about the request and wrong about the outcome, and the row gave no hint which it
+            // meant. A sink that decides later reports everything written at this point, which is
+            // also correct — nothing has been refused yet — and the SENT outcome on each record is
+            // what says the verdict is still outstanding.
             submit(StageLogPort.Stage.WRITE, pipeline.sinkNode().id(), pipeline.sinkNode().name(),
-                    pipeline.sinkInstance().connectorType(), writes++, batch.size(), batch.size(),
+                    pipeline.sinkInstance().connectorType(), writes++,
+                    batch.size(), result.written(),
                     batch.totalBytes(), startedAt, StageLogPort.Outcome.OK, null, null, null,
                     // Deliberately no request body. It was the whole batch — five hundred records
                     // written a second time, into a second store, where they were already
@@ -1482,6 +1599,21 @@ public class ChunkExecutor {
         void failed(StageLogPort.Stage stage, Instant startedAt, int records, long bytes,
                     Throwable failure) {
             log.debug("{} FAILED after {} record(s): {}", stage, records, failure.toString());
+
+            // A batch transform belongs to neither end of the pipeline, and omitting it here meant
+            // a script that threw over a whole batch left the timeline showing a read and then
+            // nothing at all.
+            if (stage == StageLogPort.Stage.TRANSFORM) {
+                if (!logsTransforms()) {
+                    return;
+                }
+                submit(stage, nodeIdsFor(TransformStage.BATCH), nodeNamesFor(TransformStage.BATCH),
+                        null, transformsRun++, records, 0, bytes, startedAt,
+                        StageLogPort.Outcome.FAILED, codeOf(failure), failure.getMessage(),
+                        null, null, null, whichStage(TransformStage.BATCH), null, null);
+                return;
+            }
+
             boolean read = stage == StageLogPort.Stage.READ;
             if (!(read ? logsReads() : logsWrites())) {
                 return;

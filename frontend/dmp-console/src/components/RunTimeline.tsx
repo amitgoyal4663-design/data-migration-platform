@@ -114,9 +114,37 @@ function TraceGroup({ traceId, entries }: { traceId: string; entries: StageLogEn
         </Typography>
       </Stack>
 
-      {entries.map((entry) => (
-        <StageRow key={entry.position} entry={entry} />
-      ))}
+      <CycleSummary entries={entries} />
+
+      {(() => {
+        const { head, deliveries } = splitIntoDeliveries(entries)
+        return (
+          <>
+            {head.map((entry) => (
+              <StageRow key={entry.position} entry={entry} />
+            ))}
+            {deliveries.map((delivery, index) => (
+              <Box key={delivery[0]!.position}>
+                {/* One heading per delivery, because the flat list could not say which batch
+                    transform belonged to which call — and with a script that throws on one group
+                    and not the next, that is the only thing worth knowing. */}
+                {deliveries.length > 1 && (
+                  <Typography
+                    variant="caption"
+                    sx={{ display: 'block', px: 1.5, py: 0.5, color: muted, borderTop: 1,
+                          borderColor: 'divider', bgcolor: 'action.hover' }}
+                  >
+                    delivery {index + 1} of {deliveries.length}
+                  </Typography>
+                )}
+                {delivery.map((entry) => (
+                  <StageRow key={entry.position} entry={entry} />
+                ))}
+              </Box>
+            ))}
+          </>
+        )
+      })()}
     </Box>
   )
 }
@@ -178,6 +206,121 @@ function Labelled({ name, value }: { name: string; value: string }) {
   )
 }
 
+/**
+ * What the whole cycle did, above the steps that did it.
+ *
+ * <p>No single row can answer "how much reached the destination". A write row carries one call's
+ * share, and delivery splits a batch across as many calls as it likes — so a cycle that wrote a
+ * thousand records across two calls showed "500 records" twice and no total anywhere. Reading it
+ * meant adding rows up by eye, and getting it wrong in the direction of thinking the sink received
+ * half of what it did.
+ *
+ * <p>Silent when the numbers cannot mislead: a cycle with one write and no transform says the same
+ * thing on its only row.
+ */
+function CycleSummary({ entries }: { entries: StageLogEntry[] }) {
+  const reads = entries.filter((e) => e.stage === 'READ')
+  const transforms = entries.filter((e) => e.stage === 'TRANSFORM')
+  const writes = entries.filter((e) => e.stage === 'WRITE')
+
+  if (writes.length === 0 && transforms.length === 0) {
+    return null
+  }
+
+  const read = reads.reduce((total, e) => total + e.recordsIn, 0)
+  // The last transform's output is what the destination was offered: the record stage may filter
+  // or split, a batch stage may rewrite, and only the final count is what was handed on.
+  const offered = transforms.length > 0 ? transforms[transforms.length - 1]!.recordsOut : read
+  const handed = writes.reduce((total, e) => total + e.recordsIn, 0)
+  const kept = writes.reduce((total, e) => total + e.recordsOut, 0)
+  const refused = handed - kept
+
+  // A single write and no transform is already fully described by its own row.
+  if (transforms.length === 0 && writes.length <= 1 && refused === 0) {
+    return null
+  }
+
+  return (
+    <Typography
+      variant="caption"
+      sx={{ display: 'block', px: 1.5, py: 0.5, color: muted, borderTop: 1,
+            borderColor: 'divider', ...tabular }}
+    >
+      {read.toLocaleString()} read
+      {transforms.length > 0 && offered !== read && (
+        <> → {offered.toLocaleString()} after transforms</>
+      )}
+      {writes.length > 0 && (
+        <>
+          {' '}→ {kept.toLocaleString()} into {writes[0]!.nodeName || 'the destination'}
+          {refused > 0 && (
+            <Box component="span" sx={{ color: 'error.main' }}>
+              {' '}({refused.toLocaleString()} refused)
+            </Box>
+          )}
+          {' · '}
+          {writes.length} call{writes.length === 1 ? '' : 's'}
+        </>
+      )}
+    </Typography>
+  )
+}
+
+/**
+ * Splits a cycle into the reading, and then one section per delivery.
+ *
+ * <p>The engine divides a batch into delivery groups and runs the batch transform per group,
+ * immediately before that group's call — so the true shape is a read followed by N deliveries, not
+ * the flat list of transforms and writes it was rendered as. With a batch script that throws on
+ * one group's records and not the next, the flat list showed a failed transform, a successful one
+ * and a write, and nothing said which belonged to which.
+ *
+ * <p>A delivery opens at a batch transform, or at a write with no transform before it. It closes
+ * at the write — or at a batch transform that failed, which ends that delivery without one.
+ */
+function splitIntoDeliveries(entries: StageLogEntry[]): {
+  head: StageLogEntry[]
+  deliveries: StageLogEntry[][]
+} {
+  const head: StageLogEntry[] = []
+  const deliveries: StageLogEntry[][] = []
+  let current: StageLogEntry[] | null = null
+
+  for (const entry of entries) {
+    const batchTransform =
+      entry.stage === 'TRANSFORM' &&
+      (entry.details as { transformStage?: string } | null)?.transformStage === 'BATCH'
+
+    if (batchTransform) {
+      current = [entry]
+      deliveries.push(current)
+      // A batch script that threw delivered nothing, so no write follows and this one is closed.
+      if (entry.outcome === 'FAILED') {
+        current = null
+      }
+      continue
+    }
+
+    if (entry.stage === 'WRITE') {
+      if (current) {
+        current.push(entry)
+        current = null
+      } else {
+        deliveries.push([entry])
+      }
+      continue
+    }
+
+    if (current) {
+      current.push(entry)
+    } else {
+      head.push(entry)
+    }
+  }
+
+  return { head, deliveries }
+}
+
 function StageRow({ entry }: { entry: StageLogEntry }) {
   const [open, setOpen] = useState(false)
   const hasDetail =
@@ -197,6 +340,7 @@ function StageRow({ entry }: { entry: StageLogEntry }) {
 
         <Typography variant="body2" sx={{ minWidth: 150 }}>
           {entry.nodeName || entry.nodeId}
+
         </Typography>
 
         <Typography variant="caption" sx={{ ...tabular, minWidth: 130 }}>
@@ -256,12 +400,17 @@ function StageRow({ entry }: { entry: StageLogEntry }) {
  * hiding among identical-looking rows.
  */
 function RecordCount({ entry }: { entry: StageLogEntry }) {
-  if (entry.stage !== 'TRANSFORM' || entry.recordsIn === entry.recordsOut) {
+  // Any stage where the two differ, not only a transform. A write whose destination refused a
+  // third of the batch was showing the batch size — true about the request, wrong about the
+  // outcome, and silent about which it meant.
+  if (entry.recordsIn === entry.recordsOut) {
     return <>{entry.recordsIn.toLocaleString()} records</>
   }
   const delta = entry.recordsOut - entry.recordsIn
+  const lost =
+    entry.stage === 'WRITE' ? `${-delta} refused by the destination` : `${-delta} dropped here`
   return (
-    <Tooltip title={delta < 0 ? `${-delta} dropped here` : `${delta} added here`}>
+    <Tooltip title={delta < 0 ? lost : `${delta} added here`}>
       <span>
         {entry.recordsIn.toLocaleString()} → {entry.recordsOut.toLocaleString()}{' '}
         <Box component="span" sx={{ color: delta < 0 ? 'warning.main' : 'info.main' }}>

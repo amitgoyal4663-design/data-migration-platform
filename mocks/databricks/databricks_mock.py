@@ -74,6 +74,10 @@ def _offset_failures():
 FAIL_OFFSETS = _offset_failures()
 REFUSED_OFFSETS = {}
 
+# The customer API refuses any batch containing a record whose JSON holds this string. A whole-call
+# refusal, which is how an ordinary API fails — one status for the request, no verdict per record.
+FAIL_INGEST_CONTAINING = os.environ.get("MOCK_FAIL_INGEST_CONTAINING", "").strip()
+
 
 def offset_of(sql):
     match = re.search(r"OFFSET\s+(\d+)", sql or "", re.IGNORECASE)
@@ -274,6 +278,13 @@ class Handler(BaseHTTPRequestHandler):
         """
         payload = json.loads(raw)
         records = payload if isinstance(payload, list) else payload.get("records", [payload])
+
+        if FAIL_INGEST_CONTAINING and FAIL_INGEST_CONTAINING in raw.decode("utf-8", "replace"):
+            print(f"  ingest: refusing {len(records)} record(s) with 503 "
+                  f"(batch contains {FAIL_INGEST_CONTAINING})")
+            return self.fail(503, "SERVICE_UNAVAILABLE",
+                             "The ingest service is temporarily unavailable")
+
         if records:
             INGESTED.insert_many(records, ordered=False)
         print(f"  ingest: {len(records)} record(s), {INGESTED.estimated_document_count()} stored")

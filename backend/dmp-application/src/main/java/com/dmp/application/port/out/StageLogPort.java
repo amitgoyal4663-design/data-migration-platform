@@ -68,9 +68,10 @@ public interface StageLogPort {
      *                   third write. Not an ordering across stages; see {@code position}
      * @param attempt    the chunk's attempt, so a retry's entries are distinguishable
      * @param recordsIn  how many records went in
-     * @param recordsOut how many came out. Differs from {@code recordsIn} only at TRANSFORM, where
-     *                   a filter drops and a splitter multiplies — and where that difference is
-     *                   the entire reason the stage is worth logging
+     * @param recordsOut how many came out: past a transform, or into the destination. Differs from
+     *                   {@code recordsIn} at a TRANSFORM that filtered or split, and at a WRITE the
+     *                   destination only partly accepted — and in both cases that difference is the
+     *                   entire reason the stage is worth logging
      * @param bytes      approximate serialised size of the records involved
      * @param durationMs wall-clock time, which is where a slow stage shows up
      * @param outcome    whether the stage itself succeeded, not whether its records did
@@ -120,7 +121,12 @@ public interface StageLogPort {
             Instant occurredAt,
             Instant expiresAt) {
 
-        /** How many records this stage lost or gained. Zero everywhere except a transform. */
+        /**
+         * How many records this stage lost or gained.
+         *
+         * <p>Negative at a TRANSFORM that filtered, positive at one that split, and negative at a
+         * WRITE the destination only partly accepted. Zero everywhere else.
+         */
         public int delta() {
             return recordsOut - recordsIn;
         }

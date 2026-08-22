@@ -331,6 +331,8 @@ services:
       # the only thing identifying a chunk when every chunk has its own statement.
       MOCK_SLOW_OFFSETS: ${MOCK_SLOW_OFFSETS:-}
       MOCK_FAIL_OFFSETS: ${MOCK_FAIL_OFFSETS:-}
+      # The customer API refuses any batch containing this string — a whole-call failure.
+      MOCK_FAIL_INGEST_CONTAINING: ${MOCK_FAIL_INGEST_CONTAINING:-}
     ports:
       - "8099:8099"
     restart: unless-stopped

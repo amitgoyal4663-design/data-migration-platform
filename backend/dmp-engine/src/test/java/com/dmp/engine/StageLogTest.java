@@ -354,6 +354,81 @@ class StageLogTest {
         }
 
         @Test
+        @DisplayName("a batch transform that throws is recorded, indexed, and not retried")
+        void aBatchTransformFailureLeavesEvidence() {
+            when(transforms.compile(any())).thenReturn(throwingBatchTransform());
+
+            // Indexing every record, because the point of the fix is that these records exist in
+            // the index afterwards — with the default level nothing is indexed at all and the
+            // assertion below would pass for the wrong reason.
+            // The group fails, not the chunk — but with only one group, every record in the chunk
+            // failed, so the rejection threshold trips and stops it. That is the circuit-breaker
+            // working rather than an abort: the chunk failed because too much of it failed, not
+            // because a script threw, and the difference shows in what was recorded first.
+            assertThatThrownBy(() -> run(
+                    AuditPolicy.DEFAULT
+                            .indexing(com.dmp.domain.audit.RecordAuditLevel.INDEXED, true)
+                            .logging(new StageLogPolicy(true, true, true, false))))
+                    .isInstanceOf(RejectionThresholdExceededException.class);
+
+            assertThat(stages.entries)
+                    .filteredOn(e -> e.stage() == StageLogPort.Stage.TRANSFORM
+                            && e.outcome() == StageLogPort.Outcome.FAILED)
+                    .as("the timeline showed a read and then nothing at all")
+                    .hasSize(1)
+                    .allSatisfy(entry -> {
+                        assertThat(entry.recordsIn()).isEqualTo(10);
+                        assertThat(entry.errorMessage()).contains("the batch is wrong");
+                    });
+
+            // Every record it stopped, so a search for one of them says what happened.
+            org.mockito.ArgumentCaptor<List<RecordIndexPort.RecordIndexEntry>> indexed =
+                    org.mockito.ArgumentCaptor.forClass(List.class);
+            org.mockito.Mockito.verify(recordIndex, org.mockito.Mockito.atLeastOnce())
+                    .indexAll(indexed.capture());
+            assertThat(indexed.getAllValues().stream().flatMap(List::stream))
+                    .hasSize(10)
+                    .allSatisfy(entry -> {
+                        assertThat(entry.outcome())
+                                .isEqualTo(RecordIndexPort.Outcome.TRANSFORM_FAILED);
+                        assertThat(entry.errorCode()).isEqualTo("BATCH_TRANSFORM_FAILED");
+                    });
+        }
+
+        @Test
+        @DisplayName("a write the destination refused outright is recorded and indexed")
+        void aRefusedCallLeavesEvidence() {
+            // The other half of the same hole. The exception unwound past indexing, so a search for
+            // any record in the refused call returned nothing — which reads as never attempted.
+            when(connectors.sink(anyString())).thenReturn(new ExplodingSink());
+
+            // The group fails and is recorded; with one group that is the whole chunk, so the
+            // threshold stops it. What matters is that it is not a raw connector exception
+            // unwinding: the records were dead-lettered and indexed on the way.
+            assertThatThrownBy(() -> run(
+                    AuditPolicy.DEFAULT
+                            .indexing(com.dmp.domain.audit.RecordAuditLevel.INDEXED, true)
+                            .logging(new StageLogPolicy(true, true, true, false))))
+                    .isInstanceOf(RejectionThresholdExceededException.class);
+
+            assertThat(stages.entries)
+                    .filteredOn(e -> e.stage() == StageLogPort.Stage.WRITE
+                            && e.outcome() == StageLogPort.Outcome.FAILED)
+                    .as("the call that failed is named, with the destination's own message")
+                    .hasSize(1);
+
+            org.mockito.ArgumentCaptor<List<RecordIndexPort.RecordIndexEntry>> indexed =
+                    org.mockito.ArgumentCaptor.forClass(List.class);
+            org.mockito.Mockito.verify(recordIndex, org.mockito.Mockito.atLeastOnce())
+                    .indexAll(indexed.capture());
+            assertThat(indexed.getAllValues().stream().flatMap(List::stream))
+                    .as("every record that was in the call, so none of them vanishes")
+                    .isNotEmpty()
+                    .allSatisfy(entry -> assertThat(entry.outcome())
+                            .isEqualTo(RecordIndexPort.Outcome.CALL_FAILED));
+        }
+
+        @Test
         @DisplayName("a chunk that reads fewer rows than it was planned for fails")
         void aShortfallIsNotASuccess() {
             // The source answers an empty result for a chunk the manifest said held ten rows —
@@ -403,6 +478,45 @@ class StageLogTest {
         }
     }
 
+    /** A batch transform that throws over the whole batch. */
+    private static RecordTransform throwingBatchTransform() {
+        return new RecordTransform() {
+            @Override
+            public List<DataRecord> applyRecord(DataRecord record) {
+                return List.of(record);
+            }
+
+            @Override
+            public com.dmp.transform.api.BatchResult applyBatch(List<DataRecord> records) {
+                throw new IllegalStateException("the batch is wrong");
+            }
+
+            @Override
+            public List<String> split(List<DataRecord> records) {
+                return List.of();
+            }
+
+            @Override
+            public boolean hasBatchStage() {
+                return true;
+            }
+
+            @Override
+            public boolean hasSplitStage() {
+                return false;
+            }
+
+            @Override
+            public boolean isIdentity() {
+                return false;
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+    }
+
     /** A record transform that keeps every other record, so in and out differ. */
     private static RecordTransform droppingEveryOther() {
         return new RecordTransform() {
@@ -449,7 +563,10 @@ class StageLogTest {
     // ------------------------------------------------------------------ setup
 
     private ChunkResult run(StageLogPolicy stageLogPolicy) {
-        AuditPolicy audit = AuditPolicy.DEFAULT.logging(stageLogPolicy);
+        return run(AuditPolicy.DEFAULT.logging(stageLogPolicy));
+    }
+
+    private ChunkResult run(AuditPolicy audit) {
         return executor.execute(pipeline(audit), split, "worker-1");
     }
 
