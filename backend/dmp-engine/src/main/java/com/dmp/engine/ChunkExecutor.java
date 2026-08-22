@@ -118,6 +118,10 @@ public class ChunkExecutor {
      * build this directly and instrumentation must never be the reason a component becomes harder
      * to construct — the next person would simply skip it.
      */
+    // Named explicitly, because a second public constructor makes the choice ambiguous and Spring
+    // then looks for a no-arg one and fails at startup rather than at compile time. The overload
+    // above exists for the five call sites that build this directly; this is the one to wire.
+    @org.springframework.beans.factory.annotation.Autowired
     public ChunkExecutor(ConnectorRegistry connectors,
                          ConnectorContexts contexts,
                          CheckpointRepository checkpoints,
