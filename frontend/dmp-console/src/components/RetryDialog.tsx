@@ -28,6 +28,13 @@ export interface RetryTarget {
   cancelledCount: number
   /** Records these chunks already wrote — what a restart would send a second time. */
   recordsAtRisk: number
+  /**
+   * The run was stopped rather than having failed, so this is a continuation.
+   *
+   * Set from the run's own state rather than inferred from the chunk counts. A stopped run that
+   * also had a failure is still a run somebody stopped, and "resume" is still what they mean.
+   */
+  resuming?: boolean
 }
 
 /**
@@ -65,12 +72,20 @@ export function RetryDialog({
   useEffect(() => {
     if (open) {
       setFrom('CHECKPOINT')
-      setIncludeCancelled(false)
+      // On by default only when it is the entire point — a stopped run with nothing failed. On a
+      // run that genuinely failed, including the chunks that never started is a real choice and
+      // stays the user's to make.
+      setIncludeCancelled(Boolean(target?.resuming) && !target?.chunkId)
       setAcknowledged(false)
     }
   }, [open])
 
   if (!target) return null
+
+  // Mechanically identical to a retry — same new run, same pinned version, same checkpoints — but
+  // named for what the user is doing. Calling it "retry 0 chunks", with the part that matters
+  // defaulted off, made the one thing they came here for the thing they had to go and find.
+  const resuming = Boolean(target.resuming) && !target.chunkId
 
   const restarting = from === 'CHUNK_START'
   const wouldResend = restarting && target.recordsAtRisk > 0
@@ -82,8 +97,13 @@ export function RetryDialog({
 
       <DialogContent>
         <Typography variant="body2" sx={{ color: muted, mb: 3 }}>
-          A retry creates a new run that re-attempts only these chunks. Chunks that completed are
-          never re-run, and the original run's record is left exactly as it is.
+          {resuming
+            ? `This creates a new run that picks up the ${target.cancelledCount} chunk${
+                target.cancelledCount === 1 ? '' : 's'
+              } the stop left unfinished, each from its saved position. Chunks that completed are
+               never re-run, and the original run's record is left exactly as it is.`
+            : `A retry creates a new run that re-attempts only these chunks. Chunks that completed
+               are never re-run, and the original run's record is left exactly as it is.`}
         </Typography>
 
         <FormControl sx={{ mb: 2 }}>
@@ -181,7 +201,10 @@ export function RetryDialog({
             })
           }
         >
-          Retry {target.chunkId ? 'chunk' : `${target.chunkCount + (includeCancelled ? target.cancelledCount : 0)} chunks`}
+          {resuming ? 'Resume' : 'Retry'}{' '}
+          {target.chunkId
+            ? 'chunk'
+            : `${target.chunkCount + (includeCancelled ? target.cancelledCount : 0)} chunks`}
         </Button>
       </DialogActions>
     </Dialog>

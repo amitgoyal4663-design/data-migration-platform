@@ -183,11 +183,20 @@ export interface StageLogEntry {
   chunkId: string
   /** The one read → transform → write cycle this belongs to, as `<chunkId>#<cycle>`. */
   traceId: string
-  stage: 'READ' | 'TRANSFORM' | 'WRITE'
+  /**
+   * `FETCH` is the source's own unit — one call it actually made — and `READ` is the engine's:
+   * however much reading it took to fill one batch. They are deliberately both here. One FETCH
+   * against two READs says a single call was buffered into two batches, which is the distinction
+   * a READ entry cannot draw and which everyone reading two identical queries drew wrongly.
+   */
+  stage: 'FETCH' | 'READ' | 'TRANSFORM' | 'WRITE'
   nodeId: string
   nodeName: string
   connectorType: string
+  /** Counts within one stage — the third read, the third write. Not an ordering across stages. */
   sequence: number
+  /** Where this falls among all of its chunk's entries. What the log is actually ordered by. */
+  position: number
   attempt: number
   recordsIn: number
   /** Differs from `recordsIn` only at TRANSFORM — which is the whole reason that stage is logged. */
@@ -265,6 +274,26 @@ export interface ValidationResponse {
   warnings: ValidationIssue[]
 }
 
+/**
+ * What the far end has agreed to accept.
+ *
+ * Either unit may be null, and null means unlimited — a client who gave exactly one number is the
+ * common case. Windows are ISO-8601 periods (`PT5M`, `PT1H`, `P1D`) so a period is one field
+ * rather than a number and a unit that can disagree.
+ */
+export interface RateLimit {
+  records: number | null
+  recordsWindow: string | null
+  calls: number | null
+  callsWindow: string | null
+  /**
+   * BURST spends a whole window at once and then waits — what a client whose counter resets on the
+   * clock expects. EVEN never exceeds the limit in any window, sliding or not, and costs throughput
+   * in proportion to how much of the window one call takes up.
+   */
+  pacing: 'BURST' | 'EVEN'
+}
+
 export interface ConnectorInstance {
   id: string
   name: string
@@ -278,6 +307,7 @@ export interface ConnectorInstance {
   lastTestError: string | null
   createdAt: string
   updatedAt: string
+  rateLimit: RateLimit | null
 }
 
 /** A connector's self-description. The configuration form is rendered from `configSchema`. */
@@ -289,6 +319,11 @@ export interface ConnectorSpec {
   configSchema: JsonSchema
   secretFields: string[]
   version: string
+  /**
+   * How one chunk counts against a rate limit. PER_CHUNK means the whole chunk is one unit of work
+   * — a bulk job, created and polled to completion — however many requests that takes underneath.
+   */
+  callCost: 'PER_REQUEST' | 'PER_CHUNK'
 }
 
 /** A connector's config schema. `x-dmp-role` marks a field that applies to only one role. */
@@ -306,8 +341,9 @@ export interface RunMetrics {
   /** What the transform stage handed to the sink. Differs from read when a script filters or splits. */
   recordsProduced: number
   recordsWritten: number
+  /** A script threw on these, or the destination refused them. Neither arrived. */
   recordsFailed: number
-  /** Records a transform deliberately dropped. */
+  /** Records a transform deliberately dropped. Never added to `recordsFailed`. */
   recordsFiltered: number
   bytesRead: number
   chunksTotal: number
@@ -327,6 +363,13 @@ export interface Run {
   trigger: string
   /** The run this one re-attempts. Separate runs on purpose, so the original stays truthful. */
   retryOf: string | null
+  /**
+   * Resumes and retries of this run, oldest first, flattened into a sequence.
+   *
+   * Sent by the server so a page counts migrations rather than rows: a run stopped and resumed
+   * three times is one entry with three attempts, not four entries.
+   */
+  attempts: Run[]
   state: RunState
   active: boolean
   terminal: boolean
@@ -356,7 +399,10 @@ export interface Chunk {
   errorMessage: string | null
   /** From the checkpoint. Also what a restart-from-the-beginning would re-send. */
   recordsWritten: number
+  /** A script threw on these, or the destination refused them. Neither arrived. */
   recordsFailed: number
+  /** Dropped by a transform on purpose. Beside `recordsFailed`, never added to it. */
+  recordsFiltered: number
   /** 0-100, or null when the chunk produced nothing to measure. */
   rejectionPercent: number | null
   /** Whether it has a saved position, so resuming differs from starting over. */
@@ -516,9 +562,37 @@ export interface RecordIndexEntry {
    */
   seq: number
   ordinal: number
-  outcome: 'WRITTEN' | 'REJECTED' | 'FILTERED'
+  /**
+   * Every way a record can leave a pipeline.
+   *
+   * REJECTED is the destination refusing this record; CALL_FAILED is the destination refusing the
+   * whole request it travelled in, having formed no opinion of the record at all. Almost every API
+   * fails the second way, and a retry can still write those records.
+   *
+   * FILTERED is a transform dropping it on purpose — a success. TRANSFORM_FAILED is a script
+   * throwing on it — not. SENT means a destination that decides later has it and has not said.
+   */
+  outcome: 'WRITTEN' | 'SENT' | 'REJECTED' | 'FILTERED' | 'TRANSFORM_FAILED' | 'CALL_FAILED'
   errorCode: string | null
+  /** Null when the pipeline's audit policy does not index payloads. Not the same as no record. */
+  payload: Record<string, unknown> | null
+  /** The record as the source produced it, present only when a transform changed it. */
+  sourcePayload: Record<string, unknown> | null
+  /** What the destination or the failing script actually said. */
+  errorMessage: string | null
   occurredAt: string
+}
+
+/** Everything a support desk can narrow a record search by. */
+export interface RecordSearchCriteria {
+  q?: string
+  field?: string
+  key?: string
+  pipelineId?: string
+  outcome?: string
+  /** ISO-8601 instants. Both optional; either may be given alone. */
+  after?: string
+  before?: string
 }
 
 /** One recorded change to a definition, or one run-lifecycle command. */

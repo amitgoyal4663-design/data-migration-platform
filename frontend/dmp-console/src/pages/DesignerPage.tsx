@@ -37,6 +37,7 @@ import { ScriptEditor, STARTER_SCRIPTS } from '@/components/ScriptEditor'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
+  useConnectorCatalogue,
   useConnectorInstances,
   usePublishVersion,
   useSaveDefinition,
@@ -47,6 +48,11 @@ import { PageHeader } from '@/components/PageHeader'
 import { VersionDetails } from '@/components/VersionDetails'
 import { useCanvasHistory } from '@/hooks/useCanvasHistory'
 import { PolicyDialog } from '@/components/PolicyDialog'
+import { FlowSummary } from '@/components/FlowSummary'
+import { DeliveryNode } from '@/components/DeliveryNode'
+import { DELIVERY_NODE_ID, withDeliveryNode } from '@/components/deliveryGraph'
+import { FanEdge } from '@/components/FanEdge'
+import { layout } from '@/components/flowLayout'
 import { ErrorPanel, Loading } from '@/components/Feedback'
 import type {
   NodeType,
@@ -100,7 +106,8 @@ const ONE_PER_PIPELINE: Partial<Record<NodeType, string>> = {
  * Registered outside the component so the object identity is stable. React Flow warns loudly and
  * re-mounts every node on each render if this is redefined inline.
  */
-const NODE_TYPES = { pipelineNode: PipelineNode }
+const NODE_TYPES = { pipelineNode: PipelineNode, delivery: DeliveryNode }
+const EDGE_TYPES = { fan: FanEdge }
 
 /**
  * How the canvas frames itself on open.
@@ -128,9 +135,21 @@ function Designer() {
 
   const version = useVersion(pipelineId, versionId)
   const connectors = useConnectorInstances()
+  const catalogue = useConnectorCatalogue()
   const save = useSaveDefinition(pipelineId, versionId)
   const validate = useValidateVersion(pipelineId, versionId)
   const publish = usePublishVersion(pipelineId)
+
+  /**
+   * The connector instance wired into a role, or undefined while either query is still loading.
+   *
+   * Read from the saved definition rather than from canvas state, so it does not flicker while a
+   * node is being dragged — the summary describes what would run, not what is under the cursor.
+   */
+  const instanceFor = (role: 'SOURCE' | 'SINK') => {
+    const id = version.data?.definition?.nodes?.find((n) => n.type === role)?.connectorInstanceId
+    return id ? connectors.data?.content?.find((c) => c.id === id) : undefined
+  }
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
@@ -138,14 +157,34 @@ function Designer() {
   const [validation, setValidation] = useState<ValidationResponse | null>(null)
   const [tuning, setTuning] = useState(false)
 
+  const sinkSpec = catalogue.data?.find(
+    (spec) => spec.type === instanceFor('SINK')?.connectorType,
+  )
+
+  /**
+   * What is actually drawn: the saved graph with the delivery step inserted where it happens.
+   *
+   * Derived every render rather than held in state, so it can never be saved by accident and can
+   * never drift from the policy it describes.
+   */
+  const drawn = useMemo(
+    () => withDeliveryNode(nodes, edges, version.data, sinkSpec),
+    [nodes, edges, version.data, sinkSpec],
+  )
+
   // Loaded once. Re-syncing on every fetch would discard edits mid-drag whenever the query
   // refetched, which is the most infuriating possible bug in a canvas editor.
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => {
     if (!version.data || hydrated) return
     const { nodes: definitionNodes, edges: definitionEdges } = version.data.definition
-    setNodes(definitionNodes.map((node, index) => toFlowNode(node, initialPosition(node, index))))
-    setEdges(definitionEdges.map(toFlowEdge))
+    const flowEdges = definitionEdges.map(toFlowEdge)
+
+    // Positions are not stored in a definition, so every viewing starts from nothing and the
+    // layout is what decides whether this reads as a pipeline or as a scatter of boxes.
+    const flowNodes = definitionNodes.map((node) => toFlowNode(node, ORIGIN))
+    setNodes(layout(flowNodes, flowEdges))
+    setEdges(flowEdges)
     setHydrated(true)
   }, [version.data, hydrated, setNodes, setEdges])
 
@@ -448,24 +487,49 @@ function Designer() {
           </Paper>
         )}
 
-        <Paper sx={{ flex: 1, overflow: 'hidden' }}>
+        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+          {version.data && (
+            <FlowSummary
+              version={version.data}
+              source={instanceFor('SOURCE')}
+              sink={instanceFor('SINK')}
+              sinkSpec={catalogue.data?.find((spec) => spec.type === instanceFor('SINK')?.connectorType)}
+            />
+          )}
+          <Paper sx={{ flex: 1, overflow: 'hidden' }}>
           <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            onNodesChange={readOnly ? undefined : onNodesChange}
+            nodes={drawn.nodes}
+            edges={drawn.edges}
+            onNodesChange={
+              readOnly
+                ? undefined
+                : (changes) =>
+                    onNodesChange(changes.filter((change) =>
+                      !('id' in change) || change.id !== DELIVERY_NODE_ID))
+            }
             onEdgesChange={readOnly ? undefined : onEdgesChange}
             onConnect={readOnly ? undefined : onConnect}
-            onNodeClick={(_, node) => setSelected(node.id)}
+            onNodeClick={(_, node) => {
+              if (node.id === DELIVERY_NODE_ID) {
+                if (!node.data?.locked) setTuning(true)
+                return
+              }
+              setSelected(node.id)
+            }}
             // Snapshot on drag start, not on every position change: React Flow emits a change per
             // pixel, so recording each one makes undo move a node by one pixel.
             onNodeDragStart={readOnly ? undefined : history.commit}
             onSelectionDragStart={readOnly ? undefined : history.commit}
+            // Positions are never stored in a definition and the row is recomputed every render,
+            // so dragging could only ever be undone a frame later. Arrangement is the layout's job.
+            nodesDraggable={false}
             deleteKeyCode={readOnly ? null : ['Backspace', 'Delete']}
             onBeforeDelete={readOnly ? undefined : async () => {
               history.commit()
               return true
             }}
             nodeTypes={NODE_TYPES}
+            edgeTypes={EDGE_TYPES}
             colorMode={mode}
             // Without an explicit connection radius the drop target is only the handle itself,
             // which is a demanding gesture on a trackpad.
@@ -473,28 +537,24 @@ function Designer() {
             defaultEdgeOptions={{ markerEnd: { type: MarkerType.ArrowClosed }, animated: true }}
             fitView
             fitViewOptions={FIT_VIEW}
-            minZoom={0.2}
+            // A column of steps is taller than it is wide, so a very low bound frames it as a
+            // smear on a wide screen.
+            minZoom={0.4}
             maxZoom={1.5}
             proOptions={{ hideAttribution: false }}
           >
             <Background gap={16} />
             <Controls />
           </ReactFlow>
-        </Paper>
+          </Paper>
+        </Box>
       </Stack>
 
       {tuning && version.data && (
         <PolicyDialog
           version={version.data}
           pipelineId={pipelineId}
-          sinkConnectorType={
-            connectors.data?.content?.find(
-              (c) =>
-                c.id ===
-                version.data?.definition?.nodes?.find((n) => n.type === 'SINK')
-                  ?.connectorInstanceId,
-            )?.connectorType
-          }
+          sinkConnectorType={instanceFor('SINK')?.connectorType}
           readOnly={readOnly}
           onClose={() => setTuning(false)}
         />
@@ -747,10 +807,8 @@ function starterConfig(type: NodeType): Record<string, unknown> {
  * node and its index — a counter held outside the component would keep climbing across every
  * render and hydration, which is exactly how nodes ended up off screen.
  */
-function initialPosition(node: import('@/api/types').NodeDefinition, index: number) {
-  const column = node.type === 'SOURCE' ? 0 : node.type === 'SINK' ? 2 : 1
-  return { x: column * 300, y: (index % 4) * 120 }
-}
+/** Every node starts here and is moved by {@link layout}, which is what actually places them. */
+const ORIGIN = { x: 0, y: 0 }
 
 function toFlowNode(
   node: import('@/api/types').NodeDefinition,

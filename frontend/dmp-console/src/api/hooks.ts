@@ -15,7 +15,9 @@ import type {
   PipelineMode,
   PipelineVersion,
   PipelineVersionSummary,
+  RateLimit,
   RecordError,
+  RecordSearchCriteria,
   RecordIndexEntry,
   StageLogEntry,
   AuditEntry,
@@ -196,6 +198,7 @@ export function useUpdateConnectorInstance() {
       config: Record<string, unknown>
       secretRefs: Record<string, string>
       description?: string
+      rateLimit?: RateLimit | null
     }) => api.put<ConnectorInstance>(`/api/v1/connector-instances/${id}`, body),
     onSuccess: () => client.invalidateQueries({ queryKey: ['connector-instances'] }),
   })
@@ -315,6 +318,7 @@ export function useCreateConnectorInstance() {
       config: Record<string, unknown>
       secretRefs: Record<string, string>
       description?: string
+      rateLimit?: RateLimit | null
     }) => api.post<ConnectorInstance>('/api/v1/connector-instances', body),
     onSuccess: () => client.invalidateQueries({ queryKey: ['connector-instances'] }),
   })
@@ -588,6 +592,25 @@ export function useDeleteSchedule() {
  * Disabled until both a pipeline and a key are chosen: an empty key would ask the server for
  * everything, and the answer to "show me all records" is not a page the support engineer wants.
  */
+/**
+ * Finds records by anything a support desk actually has.
+ *
+ * A customer quotes an order number, not a pipeline id and a MongoDB _id — so `q` searches every
+ * field of the payload, and every filter is optional. Disabled until something is typed: an empty
+ * query asks the server for every record ever indexed, which is nobody's question.
+ */
+export function useRecordLookup(criteria: RecordSearchCriteria) {
+  const something = Boolean(criteria.q?.trim() || criteria.key?.trim())
+  return useQuery({
+    queryKey: ['record-lookup', criteria],
+    queryFn: () =>
+      api.get<Page<RecordIndexEntry>>(
+        `/api/v1/records/search${query({ ...criteria, size: 50 })}`,
+      ),
+    enabled: something,
+  })
+}
+
 export function useRecordSearch(pipelineId: string, key: string) {
   return useQuery({
     queryKey: ['record-search', pipelineId, key],

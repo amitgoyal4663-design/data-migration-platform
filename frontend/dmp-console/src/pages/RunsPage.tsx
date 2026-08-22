@@ -1,5 +1,13 @@
 import Paper from '@mui/material/Paper'
 import Table from '@mui/material/Table'
+import Chip from '@mui/material/Chip'
+import IconButton from '@mui/material/IconButton'
+import Tooltip from '@mui/material/Tooltip'
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
+import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight'
+import { toChains } from '@/components/runChains'
+import { RunChainRows, type ChainRowProps } from '@/components/RunChainRows'
+import type { Run } from '@/api/types'
 import TableBody from '@mui/material/TableBody'
 import TableCell from '@mui/material/TableCell'
 import TableHead from '@mui/material/TableHead'
@@ -18,6 +26,7 @@ import { formatDuration } from './DashboardPage'
 import { RunParameters } from '@/components/RunParameters'
 import { tabular } from '@/theme'
 import type { RunState } from '@/api/types'
+import { shortId } from '@/api/ids'
 
 const FILTERS: { key: string; label: string; states?: RunState[] }[] = [
   { key: 'all', label: 'All' },
@@ -64,6 +73,7 @@ export function RunsPage() {
           <Table size="small">
             <TableHead>
               <TableRow>
+                <TableCell sx={{ width: 40 }} />
                 <TableCell>RUN</TableCell>
                 <TableCell>STATE</TableCell>
                 <TableCell>TRIGGER</TableCell>
@@ -77,7 +87,31 @@ export function RunsPage() {
               </TableRow>
             </TableHead>
             <TableBody>
-              {runs.data?.content.map((run) => (
+              {toChains(runs.data?.content ?? []).map((chain) => (
+                <RunChainRows
+                  key={chain.root.id}
+                  chain={chain}
+                  render={(run, props) => <RunRow key={run.id} run={run} {...props} />}
+                />
+              ))}
+            </TableBody>
+          </Table>
+        </Paper>
+      )}
+    </>
+  )
+}
+
+/** One row of the runs table, whether it is a migration's first attempt or one of its resumes. */
+function RunRow({ run, chain, expanded, onToggle }: ChainRowProps & { run: Run }) {
+  // A chain's row stands for the migration, so it reports the latest attempt's state and the
+  // whole chain's totals. Reporting the first attempt's STOPPED for a migration that later
+  // finished answers a question nobody asked.
+  const state = chain ? chain.latest.state : run.state
+  const written = chain ? chain.totalWritten : run.metrics.recordsWritten
+  const read = chain ? chain.totalRead : run.metrics.recordsRead
+
+  return (
                 <TableRow
                   key={run.id}
                   hover
@@ -85,14 +119,43 @@ export function RunsPage() {
                   to={`/runs/${run.id}`}
                   sx={{ textDecoration: 'none', cursor: 'pointer' }}
                 >
+                  <TableCell sx={{ width: 40 }}>
+                    {onToggle && (
+                      <Tooltip title={expanded ? 'Hide attempts' : `${(chain?.attempts.length ?? 0) + 1} attempts`}>
+                        <IconButton
+                          size="small"
+                          onClick={(event) => {
+                            // The row is a link; expanding is not navigating.
+                            event.preventDefault()
+                            event.stopPropagation()
+                            onToggle()
+                          }}
+                        >
+                          {expanded ? (
+                            <KeyboardArrowDownIcon fontSize="small" />
+                          ) : (
+                            <KeyboardArrowRightIcon fontSize="small" />
+                          )}
+                        </IconButton>
+                      </Tooltip>
+                    )}
+                  </TableCell>
                   <TableCell>
                     <Typography variant="body2" sx={{ fontWeight: 600 }}>
                       v{run.versionNumber}
+                      {chain && (
+                        <Chip
+                          size="small"
+                          variant="outlined"
+                          label={`${chain.attempts.length + 1} attempts`}
+                          sx={{ ml: 1, height: 18, fontSize: 10 }}
+                        />
+                      )}
                     </Typography>
-                    <Typography variant="caption">{run.id.slice(0, 8)}</Typography>
+                    <Typography variant="caption">{shortId(run.id)}</Typography>
                   </TableCell>
                   <TableCell>
-                    <RunStateChip state={run.state} />
+                    <RunStateChip state={state} />
                   </TableCell>
                   {/*
                     What each run actually covered. The run page has always shown this; the list
@@ -103,10 +166,10 @@ export function RunsPage() {
                     <RunParameters parameters={run.parameters} />
                   </TableCell>
                   <TableCell align="right" sx={tabular}>
-                    {run.metrics.recordsRead.toLocaleString()}
+                    {read.toLocaleString()}
                   </TableCell>
                   <TableCell align="right" sx={tabular}>
-                    {run.metrics.recordsWritten.toLocaleString()}
+                    {written.toLocaleString()}
                   </TableCell>
                   <TableCell align="right" sx={tabular}>
                     {run.metrics.recordsFailed > 0 ? (
@@ -138,11 +201,7 @@ export function RunsPage() {
                     </Typography>
                   </TableCell>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Paper>
-      )}
-    </>
   )
 }
+
+

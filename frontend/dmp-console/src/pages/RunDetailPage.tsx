@@ -141,12 +141,20 @@ export function RunDetailPage() {
   const replayableCount = (groups.data ?? []).reduce((sum, group) => sum + group.samplesStored, 0)
   const replayable = current.terminal && current.state !== 'ARCHIVED' && replayableCount > 0
 
+  // A run somebody stopped is resumed, not retried. Same machinery underneath — a new run over the
+  // chunks that did not finish, each from its checkpoint — but the word has to match the intent, or
+  // the only button offered after a stop reads as though it were about repairing a failure.
+  const stopped = current.state === 'STOPPED'
+
   const openRunRetry = () =>
     setRetryTarget({
-      label: `Retry ${failedChunks.length} failed chunk${failedChunks.length === 1 ? '' : 's'}`,
+      label: stopped
+        ? `Resume ${cancelledChunks.length} unfinished chunk${cancelledChunks.length === 1 ? '' : 's'}`
+        : `Retry ${failedChunks.length} failed chunk${failedChunks.length === 1 ? '' : 's'}`,
       chunkCount: failedChunks.length,
       cancelledCount: cancelledChunks.length,
       recordsAtRisk: failedChunks.reduce((sum, c) => sum + c.recordsWritten, 0),
+      resuming: stopped,
     })
 
   const confirmRetry = (options: {
@@ -267,8 +275,12 @@ export function RunDetailPage() {
               </Button>
             )}
             {retryable && (
-              <Button variant="contained" startIcon={<ReplayIcon />} onClick={openRunRetry}>
-                Retry
+              <Button
+                variant="contained"
+                startIcon={stopped ? <PlayArrowIcon /> : <ReplayIcon />}
+                onClick={openRunRetry}
+              >
+                {stopped ? 'Resume' : 'Retry'}
               </Button>
             )}
           </>
@@ -368,10 +380,10 @@ export function RunDetailPage() {
         </Grid>
         <Grid size={{ xs: 6, md: transformed ? 2.4 : 3 }}>
           <StatTile
-            label="Rejected"
+            label="Failed"
             value={metrics.recordsFailed}
             tone={metrics.recordsFailed > 0 ? 'critical' : 'default'}
-            hint="Individual records the destination refused, or a transform threw on. Listed under Rejected records."
+            hint="Records that did not reach the destination and were not meant to be dropped — a script threw on them, or the destination refused them. Both are failures; only Filtered is deliberate. Listed under Rejected records."
           />
         </Grid>
         <Grid size={{ xs: 6, md: transformed ? 2.4 : 3 }}>
@@ -387,14 +399,7 @@ export function RunDetailPage() {
         </Grid>
       </Grid>
 
-      {transformed && (
-        <Typography variant="body2" sx={{ color: muted, mb: 3, ...tabular }}>
-          {metrics.recordsRead.toLocaleString()} read → {metrics.recordsFiltered.toLocaleString()}{' '}
-          filtered, {metrics.recordsProduced.toLocaleString()} sent to the destination →{' '}
-          {metrics.recordsWritten.toLocaleString()} written
-          {metrics.recordsFailed > 0 && <>, {metrics.recordsFailed.toLocaleString()} rejected</>}.
-        </Typography>
-      )}
+      {transformed && <Reconciliation metrics={metrics} />}
 
       <SettingsUsed version={version.data} />
 
@@ -853,7 +858,8 @@ function ChunkTable({
             <TableCell>RANGE</TableCell>
             <TableCell>WORKER</TableCell>
             <TableCell align="right">WRITTEN</TableCell>
-            <TableCell align="right">REJECTED</TableCell>
+            <TableCell align="right">FILTERED</TableCell>
+            <TableCell align="right">FAILED</TableCell>
             <TableCell align="right">ATTEMPT</TableCell>
             <TableCell>ERROR</TableCell>
             <TableCell sx={{ width: 56 }} />
@@ -902,12 +908,34 @@ function ChunkTable({
               <TableCell align="right" sx={tabular}>
                 {chunk.recordsWritten > 0 ? chunk.recordsWritten.toLocaleString() : '—'}
               </TableCell>
+              {/* Between written and failed on purpose. It is neither, and the reader's eye
+                  should not have to travel past a failure count to find out that a chunk's
+                  missing records were dropped deliberately. */}
+              <TableCell align="right" sx={tabular}>
+                {chunk.recordsFiltered > 0 ? (
+                  <Tooltip title="Records a transform dropped on purpose. Not a failure — they were excluded from the destination deliberately, and they are not counted in the percentage beside them.">
+                    <Typography variant="caption" sx={{ ...tabular, color: muted }}>
+                      {chunk.recordsFiltered.toLocaleString()}
+                    </Typography>
+                  </Tooltip>
+                ) : (
+                  '—'
+                )}
+              </TableCell>
               <TableCell align="right" sx={tabular}>
                 {chunk.recordsFailed > 0 ? (
-                  <Typography variant="caption" color="error.main" sx={tabular}>
-                    {chunk.recordsFailed.toLocaleString()}
-                    {chunk.rejectionPercent !== null && ` (${chunk.rejectionPercent}%)`}
-                  </Typography>
+                  // The bare percentage was unreadable: a number with no denominator beside a
+                  // different number. It is the share of what this chunk actually attempted to
+                  // deliver — records it filtered on purpose are not in it — and saying so is the
+                  // difference between a figure somebody can act on and one they ignore.
+                  <Tooltip
+                    title={`${chunk.rejectionPercent}% of the records this chunk attempted to deliver. Records dropped by a filter are excluded.`}
+                  >
+                    <Typography variant="caption" color="error.main" sx={tabular}>
+                      {chunk.recordsFailed.toLocaleString()}
+                      {chunk.rejectionPercent !== null && ` (${chunk.rejectionPercent}% of attempted)`}
+                    </Typography>
+                  </Tooltip>
                 ) : (
                   '—'
                 )}
@@ -949,6 +977,69 @@ function ChunkTable({
  * Shows the record itself, not just a count. "5,000 records failed" tells someone they have a
  * problem; the payload and the destination's own error message tell them how to fix it.
  */
+/**
+ * Where every record read went, as a sum that has to balance.
+ *
+ * <p>Written as an equation rather than a sentence because the question it answers is arithmetic:
+ * a thousand records were read and four hundred and sixty-six were written, so what happened to
+ * the other five hundred and thirty-four? Prose invites the reader to skim past the gap; a total
+ * that does not add up is visible immediately.
+ *
+ * <p><b>Filtered sits on its own side of the line.</b> It is the one number here that is not a
+ * loss — a transform dropped those records because it was told to — and grouping it with failures
+ * makes a working filter look like an incident.
+ */
+function Reconciliation({ metrics }: { metrics: import('@/api/types').RunMetrics }) {
+  const accounted =
+    metrics.recordsWritten + metrics.recordsFailed + metrics.recordsFiltered
+  // Never expected to be non-zero, and shown rather than hidden if it is. A silent discrepancy in
+  // the one place people come to reconcile counts is worse than an ugly one.
+  const unaccounted = metrics.recordsRead - accounted
+
+  return (
+    <Box sx={{ mb: 3 }}>
+      <Stack direction="row" spacing={1} alignItems="baseline" flexWrap="wrap" useFlexGap
+             sx={{ ...tabular }}>
+        <Typography variant="body2" sx={{ fontWeight: 700 }}>
+          {metrics.recordsRead.toLocaleString()} read
+        </Typography>
+        <Typography variant="body2" sx={{ color: muted }}>=</Typography>
+
+        <Typography variant="body2" sx={{ color: 'success.main', fontWeight: 600 }}>
+          {metrics.recordsWritten.toLocaleString()} written
+        </Typography>
+        <Typography variant="body2" sx={{ color: muted }}>+</Typography>
+
+        <Typography
+          variant="body2"
+          sx={{ color: metrics.recordsFailed > 0 ? 'error.main' : muted, fontWeight: 600 }}
+        >
+          {metrics.recordsFailed.toLocaleString()} failed
+        </Typography>
+        <Typography variant="body2" sx={{ color: muted }}>+</Typography>
+
+        <Typography variant="body2" sx={{ color: muted, fontWeight: 600 }}>
+          {metrics.recordsFiltered.toLocaleString()} filtered on purpose
+        </Typography>
+
+        {unaccounted !== 0 && (
+          <>
+            <Typography variant="body2" sx={{ color: muted }}>+</Typography>
+            <Typography variant="body2" sx={{ color: 'warning.main', fontWeight: 700 }}>
+              {unaccounted.toLocaleString()} unaccounted for
+            </Typography>
+          </>
+        )}
+      </Stack>
+
+      <Typography variant="caption" sx={{ color: muted }}>
+        Failed covers both a script throwing on a record and the destination refusing it — neither
+        arrived. Filtered is a transform dropping records deliberately, and is not a loss.
+      </Typography>
+    </Box>
+  )
+}
+
 function RejectedRecords({ errors }: { errors: import('@/api/types').RecordError[] }) {
   if (errors.length === 0) {
     return (

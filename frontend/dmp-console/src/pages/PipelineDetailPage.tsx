@@ -15,6 +15,10 @@ import Chip from '@mui/material/Chip'
 import Paper from '@mui/material/Paper'
 import Stack from '@mui/material/Stack'
 import Table from '@mui/material/Table'
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
+import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight'
+import { toChains } from '@/components/runChains'
+import { RunChainRows, type ChainRowProps } from '@/components/RunChainRows'
 import TableBody from '@mui/material/TableBody'
 import TableCell from '@mui/material/TableCell'
 import TableHead from '@mui/material/TableHead'
@@ -47,6 +51,7 @@ import { RunParameters } from '@/components/RunParameters'
 import { RunStateChip } from '@/components/StateChip'
 import { muted, status } from '@/theme'
 import type { PipelineVersionSummary, VersionStatus } from '@/api/types'
+import { shortId } from '@/api/ids'
 
 /**
  * A run's parameters in the shape the start endpoint takes.
@@ -427,6 +432,7 @@ export function PipelineDetailPage() {
         <Table size="small">
           <TableHead>
             <TableRow>
+              <TableCell sx={{ width: 40 }} />
               <TableCell>RUN</TableCell>
               <TableCell>VERSION</TableCell>
               <TableCell>STATE</TableCell>
@@ -437,7 +443,11 @@ export function PipelineDetailPage() {
             </TableRow>
           </TableHead>
           <TableBody>
-            {runList.map((run) => (
+            {toChains(runList).map((chain) => (
+              <RunChainRows
+                key={chain.root.id}
+                chain={chain}
+                render={(run: import('@/api/types').Run, props: ChainRowProps) => (
               <TableRow
                 key={run.id}
                 hover
@@ -445,12 +455,44 @@ export function PipelineDetailPage() {
                 to={`/runs/${run.id}`}
                 sx={{ textDecoration: 'none', cursor: 'pointer' }}
               >
+                <TableCell sx={{ width: 40 }}>
+                  {props.onToggle && (
+                    <Tooltip
+                      title={props.expanded ? 'Hide attempts' : `${(props.chain?.attempts.length ?? 0) + 1} attempts`}
+                    >
+                      <IconButton
+                        size="small"
+                        onClick={(event) => {
+                          // The row is a link; expanding is not navigating.
+                          event.preventDefault()
+                          event.stopPropagation()
+                          props.onToggle?.()
+                        }}
+                      >
+                        {props.expanded ? (
+                          <KeyboardArrowDownIcon fontSize="small" />
+                        ) : (
+                          <KeyboardArrowRightIcon fontSize="small" />
+                        )}
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                </TableCell>
                 <TableCell>
-                  <Typography variant="caption">{run.id.slice(0, 8)}</Typography>
+                  <Typography variant="caption">{shortId(run.id)}</Typography>
+                  {props.chain && (
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      label={`${props.chain.attempts.length + 1} attempts`}
+                      sx={{ ml: 1, height: 18, fontSize: 10 }}
+                    />
+                  )}
                 </TableCell>
                 <TableCell>v{run.versionNumber}</TableCell>
                 <TableCell>
-                  <RunStateChip state={run.state} />
+                  {/* The migration's state, which is the latest attempt's — not the first one's. */}
+                  <RunStateChip state={props.chain ? props.chain.latest.state : run.state} />
                 </TableCell>
                 {/*
                   Which window each run took. On a scheduled pipeline this column is the whole
@@ -461,7 +503,7 @@ export function PipelineDetailPage() {
                   <RunParameters parameters={run.parameters} />
                 </TableCell>
                 <TableCell align="right">
-                  {run.metrics.recordsWritten.toLocaleString()}
+                  {(props.chain ? props.chain.totalWritten : run.metrics.recordsWritten).toLocaleString()}
                 </TableCell>
                 <TableCell>
                   <Typography variant="caption">
@@ -508,10 +550,12 @@ export function PipelineDetailPage() {
                   )}
                 </TableCell>
               </TableRow>
+                )}
+              />
             ))}
             {runList.length === 0 && (
               <TableRow>
-                <TableCell colSpan={6}>
+                <TableCell colSpan={7}>
                   <Typography variant="body2" sx={{ color: muted, py: 2 }}>
                     {runPage === 0
                       ? 'This pipeline has not run yet.'

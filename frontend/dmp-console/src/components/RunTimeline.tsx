@@ -60,7 +60,8 @@ export function RunTimeline({ runId }: { runId: string }) {
           sx={{ minWidth: 200 }}
         >
           <MenuItem value="">All stages</MenuItem>
-          <MenuItem value="READ">Read</MenuItem>
+          <MenuItem value="FETCH">Fetch (calls to the source)</MenuItem>
+          <MenuItem value="READ">Read (batches filled)</MenuItem>
           <MenuItem value="TRANSFORM">Transform</MenuItem>
           <MenuItem value="WRITE">Write</MenuItem>
         </TextField>
@@ -106,18 +107,74 @@ function TraceGroup({ traceId, entries }: { traceId: string; entries: StageLogEn
         spacing={1}
         sx={{ px: 1.5, py: 0.75, bgcolor: 'action.hover' }}
       >
-        <Typography variant="caption" sx={{ ...tabular, fontWeight: 600 }}>
-          {traceId}
-        </Typography>
+        <CopyableTrace traceId={traceId} entries={entries} />
         <Typography variant="caption" sx={{ color: muted }}>
           {entries.length} stage{entries.length === 1 ? '' : 's'} ·{' '}
           {entries.reduce((total, entry) => total + entry.durationMs, 0)} ms
         </Typography>
       </Stack>
+
       {entries.map((entry) => (
-        <StageRow key={`${entry.stage}-${entry.sequence}`} entry={entry} />
+        <StageRow key={entry.position} entry={entry} />
       ))}
     </Box>
+  )
+}
+
+/**
+ * The group's trace id, and the string that finds its chunk in the application logs.
+ *
+ * <p>Two different ids meet here and conflating them would send somebody to an empty grep. The
+ * heading is the <em>cycle</em> trace — {@code chunk#0}, {@code chunk#1} — which is what ties one
+ * read, its transforms and its writes together, and what the record index stamps on every record
+ * that travelled in them. What the engine stamps on a <em>log line</em> is coarser: the run, the
+ * chunk and the attempt, because a log line belongs to a chunk rather than to one cycle of it.
+ * So the visible id is the cycle and the copied one is the log's.
+ */
+function CopyableTrace({ traceId, entries }: { traceId: string; entries: StageLogEntry[] }) {
+  const first = entries[0]
+
+  return (
+    <Stack direction="row" spacing={2} alignItems="baseline" flexWrap="wrap" useFlexGap>
+      {/* Both, labelled, because they are different things and one raw hex string said neither.
+          chunkId is the key every store agrees on — the stage log, the record index, and the
+          application log line all carry it. traceId is finer: which read-transform-write cycle
+          within the chunk, and what the records that travelled in it are stamped with. */}
+      {first?.chunkId && <Labelled name="chunkId" value={first.chunkId} />}
+      <Labelled name="traceId" value={traceId} />
+    </Stack>
+  )
+}
+
+/** A named id, shown in full and copied whole. */
+function Labelled({ name, value }: { name: string; value: string }) {
+  const [copied, setCopied] = useState(false)
+
+  return (
+    <Stack direction="row" spacing={0.5} alignItems="baseline">
+      <Typography variant="caption" sx={{ color: muted }}>
+        {name}=
+      </Typography>
+      <Tooltip title={copied ? 'Copied' : 'Click to copy'}>
+        <Typography
+          variant="caption"
+          onClick={() => {
+            void navigator.clipboard.writeText(value)
+            setCopied(true)
+            window.setTimeout(() => setCopied(false), 1500)
+          }}
+          sx={{
+            ...tabular,
+            fontWeight: 600,
+            cursor: 'pointer',
+            color: copied ? 'success.main' : 'inherit',
+            '&:hover': { color: 'primary.main' },
+          }}
+        >
+          {value}
+        </Typography>
+      </Tooltip>
+    </Stack>
   )
 }
 
@@ -150,8 +207,12 @@ function StageRow({ entry }: { entry: StageLogEntry }) {
           {entry.durationMs} ms
         </Typography>
 
+        {/* Why, then what. A URL is the least legible thing on the row and was winning the
+            slot: two fetches against one chunk showed two near-identical ninety-character
+            strings, and nothing said one had fetched column names and the other a thousand
+            rows. The URL is still there, one click away. */}
         <Typography variant="caption" sx={{ ...tabular, color: muted, flex: 1 }} noWrap>
-          {entry.errorMessage ?? entry.query ?? summarise(entry.details)}
+          {entry.errorMessage ?? reasonOf(entry) ?? entry.query ?? summarise(entry.details)}
         </Typography>
 
         {hasDetail && (
@@ -176,7 +237,10 @@ function StageRow({ entry }: { entry: StageLogEntry }) {
           <Detail label="Cursor before" value={entry.cursorIn} />
           <Detail label="Cursor after" value={entry.cursorOut} />
           <Detail label="What the destination reported" value={entry.details} />
-          <Detail label="Sent" value={entry.request} />
+          {/* No "Sent" row. It held the whole batch — the records themselves — which are in the
+              record index, one document each, searchable by any field they contain. Here they were
+              one unsearchable blob per call, usually truncated, and they crowded out the small
+              facts this panel exists for. */}
           <Detail label="Received" value={entry.response} />
         </Stack>
       </Collapse>
@@ -240,7 +304,10 @@ function Detail({ label, value }: { label: string; value: unknown }) {
   )
 }
 
-const STAGE_COLOUR: Record<StageLogEntry['stage'], 'primary' | 'secondary' | 'success'> = {
+const STAGE_COLOUR: Record<StageLogEntry['stage'], 'primary' | 'secondary' | 'success' | 'info'> = {
+  // Distinct from READ rather than sharing its colour, because the pair sitting next to each other
+  // is the point: the same colour twice would read as the same thing logged twice.
+  FETCH: 'info',
   READ: 'primary',
   TRANSFORM: 'secondary',
   WRITE: 'success',
@@ -268,11 +335,41 @@ function groupByTrace(entries: StageLogEntry[]): { traceId: string; entries: Sta
 }
 
 /** A one-line gist of a details object, for the collapsed row. */
+/**
+ * A connector's own report, on one line.
+ *
+ * <p>`String(value)` was fine while every destination reported flat scalars — a job id, a status —
+ * and became `[object Object]` the moment one reported the reply body. The row it renders is the
+ * collapsed summary, so a value that cannot be summarised in a few characters is better named than
+ * stringified: `response={6 keys}` tells the reader to expand, `[object Object]` tells them
+ * nothing and looks like a defect.
+ */
+/** The connector's own words for why it made this call, when it gave any. */
+function reasonOf(entry: StageLogEntry): string | null {
+  const reason = entry.details?.reason
+  return typeof reason === 'string' && reason.length > 0 ? reason : null
+}
+
 function summarise(details: Record<string, unknown> | null): string {
   if (!details) {
     return ''
   }
   return Object.entries(details)
-    .map(([name, value]) => `${name}=${String(value)}`)
+    .map(([name, value]) => `${name}=${describe(value)}`)
     .join('  ')
+}
+
+function describe(value: unknown): string {
+  if (value === null || value === undefined) {
+    return '—'
+  }
+  if (Array.isArray(value)) {
+    return `[${value.length}]`
+  }
+  if (typeof value === 'object') {
+    const keys = Object.keys(value as object)
+    return `{${keys.length} field${keys.length === 1 ? '' : 's'}}`
+  }
+  const text = String(value)
+  return text.length > 60 ? `${text.slice(0, 60)}…` : text
 }

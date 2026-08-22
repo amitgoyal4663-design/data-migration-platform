@@ -32,7 +32,9 @@ import {
   useUpdateConnectorInstance,
   useDeleteConnectorInstance,
 } from '@/api/hooks'
-import type { ConnectorInstance } from '@/api/types'
+import Divider from '@mui/material/Divider'
+import { RateLimitFields } from '@/components/RateLimitFields'
+import type { ConnectorInstance, RateLimit } from '@/api/types'
 import { PageHeader } from '@/components/PageHeader'
 import { SchemaForm } from '@/components/SchemaForm'
 import { EmptyState, ErrorPanel, Loading } from '@/components/Feedback'
@@ -236,7 +238,16 @@ function CreateConnectorDialog({
   const [description, setDescription] = useState(editing?.description ?? '')
   const [direction, setDirection] = useState(editing?.direction ?? 'BOTH')
   const [config, setConfig] = useState<Record<string, unknown>>(editing?.config ?? {})
-  const [secrets, setSecrets] = useState<Record<string, string>>({})
+  // Seeded from the connector being edited, like every other field here. It was not, and the
+  // consequence was silent and severe: opening a connection to rename it, or to correct a URL,
+  // submitted an empty secret map and deleted every credential reference it had. Nothing said so.
+  // The next run failed with "no 'token' secret is configured" — naming a field the person had
+  // never touched, on a connection that had worked ten minutes earlier.
+  //
+  // Safe to seed because these are references and not values: the store holds `env:DBX_TOKEN`,
+  // never the token. There is nothing secret here to put into a form.
+  const [secrets, setSecrets] = useState<Record<string, string>>(editing?.secretRefs ?? {})
+  const [rateLimit, setRateLimit] = useState<RateLimit | null>(editing?.rateLimit ?? null)
 
   const spec = useMemo(
     () => catalogue.data?.find((candidate) => candidate.type === type),
@@ -248,13 +259,13 @@ function CreateConnectorDialog({
       // The connector type is deliberately absent: a different type has a different configuration
       // shape, so every stored value would become meaningless. That is a new connection.
       update.mutate(
-        { id: editing.id, name, direction, config, secretRefs: secrets, description },
+        { id: editing.id, name, direction, config, secretRefs: secrets, description, rateLimit },
         { onSuccess: onClose },
       )
       return
     }
     create.mutate(
-      { name, connectorType: type, direction, config, secretRefs: secrets, description },
+      { name, connectorType: type, direction, config, secretRefs: secrets, description, rateLimit },
       { onSuccess: onClose },
     )
   }
@@ -333,6 +344,10 @@ function CreateConnectorDialog({
                   errors={create.error instanceof Error ? undefined : undefined}
                 />
               </Box>
+
+              <Divider />
+
+              <RateLimitFields value={rateLimit} onChange={setRateLimit} />
             </>
           )}
 
