@@ -6,6 +6,7 @@ import { PipelineDetailPage } from './pages/PipelineDetailPage'
 import { DesignerPage } from './pages/DesignerPage'
 import { ConnectorsPage } from './pages/ConnectorsPage'
 import { OperationsPage } from './pages/OperationsPage'
+import { StatusBoardPage } from './pages/StatusBoardPage'
 import { RunsPage } from './pages/RunsPage'
 import { RunDetailPage } from './pages/RunDetailPage'
 import { SchedulesPage } from './pages/SchedulesPage'
@@ -31,5 +32,11 @@ export const router = createBrowserRouter([
       { path: 'records', element: <RecordSearchPage /> },
       { path: 'audit', element: <AuditPage /> },
     ],
+  },
+  {
+    // Outside the shell on purpose. A screen on a wall has nobody to navigate it, and every pixel
+    // of chrome is a pixel not spent on something readable from across a room.
+    path: '/board',
+    element: <StatusBoardPage />,
   },
 ])

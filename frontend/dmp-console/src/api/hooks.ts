@@ -25,6 +25,7 @@ import type {
   RateLimit,
   Notifier,
   OperationsDashboard,
+  StatusBoard,
   NotifierEvent,
   RecordError,
   Reconciliation,
@@ -314,6 +315,23 @@ export function useOperationsDashboard(refetchInterval: number) {
     queryKey: ['operations-dashboard'],
     queryFn: () => api.get<OperationsDashboard>('/api/v1/operations/dashboard'),
     refetchInterval,
+  })
+}
+
+/**
+ * The wall board.
+ *
+ * One query for the whole screen, deliberately: four that can each fail separately produce a board
+ * showing three quarters of the truth with nothing to say the last quarter is missing.
+ */
+export function useStatusBoard(refetchInterval: number) {
+  return useQuery({
+    queryKey: ['status-board'],
+    queryFn: () => api.get<StatusBoard>('/api/v1/operations/board'),
+    refetchInterval,
+    // Keeps the last good board on screen through a blip rather than blanking it. The page
+    // detects staleness itself and says so, which is more useful than an empty wall.
+    placeholderData: (previous) => previous,
   })
 }
 

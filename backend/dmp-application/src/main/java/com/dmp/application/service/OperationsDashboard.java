@@ -308,6 +308,129 @@ public class OperationsDashboard {
         return hours < 48 ? hours + "h" : (hours / 24) + "d";
     }
 
+    /**
+     * Everything a wall display shows, in one call.
+     *
+     * <p>One call because a screen on a wall is refreshed on a timer forever, and four calls that
+     * can each fail separately produce a board showing three quarters of the truth with nothing to
+     * say the last quarter is missing. A board that is wrong without admitting it is worse than a
+     * blank one.
+     *
+     * <p>Covers every run, not only the watchlist. The watchlist exists so one person's morning
+     * screen stays small; a wall is read by whoever walks past, and a failure nobody thought to
+     * watch is exactly the one that should be up there.
+     */
+    public Board board(Duration window) {
+        TenantId tenantId = tenantContext.currentTenant();
+        Instant now = clock.instant();
+        Instant since = now.minus(window);
+
+        List<Run> active = runs.findActive(tenantId);
+
+        List<Run> recent = runs.search(tenantId,
+                        new RunRepository.RunSearch(null, Set.of(), since, null, null),
+                        new PageQuery(0, 200, "createdAt", false))
+                .content().stream()
+                .filter(run -> !run.dryRun())
+                .toList();
+
+        List<Live> live = active.stream()
+                .filter(run -> !run.dryRun())
+                .map(run -> new Live(
+                        run.id().toString(),
+                        pipelineName(tenantId, run.pipelineId()),
+                        run.state().name(),
+                        run.metrics().progress().isPresent()
+                                ? run.metrics().progress().getAsDouble() : null,
+                        run.metrics().recordsRead(),
+                        run.metrics().recordsWritten(),
+                        run.duration(now).map(Duration::toSeconds).orElse(0L)))
+                .sorted(Comparator.comparing(Live::pipeline))
+                .toList();
+
+        Today today = new Today(
+                recent.stream().filter(r -> r.state() == RunState.COMPLETED).count(),
+                recent.stream().filter(r -> r.state() == RunState.FAILED).count(),
+                recent.stream().mapToLong(r -> r.metrics().recordsRead()).sum(),
+                recent.stream().mapToLong(r -> r.metrics().recordsWritten()).sum(),
+                recent.stream().mapToLong(r -> r.metrics().recordsFailed()).sum(),
+                live.size());
+
+        List<Attention> attention = new ArrayList<>();
+
+        // Every failure in the window, whether or not anybody watches that pipeline.
+        for (Run run : recent) {
+            if (run.state() == RunState.FAILED) {
+                attention.add(new Attention(Severity.CRITICAL,
+                        pipelineName(tenantId, run.pipelineId()), run.id().toString(),
+                        "Run failed",
+                        run.errorMessage() == null ? run.errorCode() : run.errorMessage(),
+                        run.endedAt() == null ? run.createdAt() : run.endedAt()));
+            } else if (run.metrics().unaccountedRecords() != 0) {
+                // Green everywhere else, which is the whole reason it belongs on a wall.
+                attention.add(new Attention(Severity.CRITICAL,
+                        pipelineName(tenantId, run.pipelineId()), run.id().toString(),
+                        run.metrics().unaccountedRecords() + " records unaccounted for",
+                        "Reached delivery and were neither written nor reported failed",
+                        run.endedAt() == null ? run.createdAt() : run.endedAt()));
+            }
+        }
+
+        // Then the anomalies, which need a baseline and so only exist for watched pipelines.
+        for (PipelineHealth health : today(window)) {
+            for (Finding finding : health.findings()) {
+                if (finding.severity() == Severity.INFO || "FAILED".equals(finding.code())
+                        || "UNACCOUNTED".equals(finding.code())) {
+                    continue;   // Already listed above, from the run itself.
+                }
+                attention.add(new Attention(finding.severity(), health.name(),
+                        health.latest() == null ? null : health.latest().id().toString(),
+                        headlineFor(finding.code()), finding.message(), now));
+            }
+        }
+
+        attention.sort(Comparator.comparingInt((Attention a) -> a.severity().ordinal()).reversed()
+                .thenComparing(Attention::at, Comparator.reverseOrder()));
+
+        Severity verdict = attention.stream().map(Attention::severity)
+                .max(Comparator.naturalOrder()).orElse(Severity.INFO);
+
+        return new Board(verdict, live, today, List.copyOf(attention), now);
+    }
+
+    /** Short enough to read across a room; the sentence underneath carries the detail. */
+    private static String headlineFor(String code) {
+        return switch (code) {
+            case "DID_NOT_RUN" -> "Scheduled run never started";
+            case "NO_ROWS" -> "Completed with no data";
+            case "VOLUME_LOW" -> "Volume down";
+            case "VOLUME_HIGH" -> "Volume up";
+            case "REJECTIONS" -> "Records not delivered";
+            case "SLOW" -> "Running slow";
+            default -> code;
+        };
+    }
+
+    private String pipelineName(TenantId tenantId, PipelineId id) {
+        return pipelines.findById(tenantId, id).map(Pipeline::name).orElse(id.toString());
+    }
+
+    public record Live(String runId, String pipeline, String state, Double progress,
+                       long recordsRead, long recordsWritten, long seconds) {
+    }
+
+    public record Today(long completed, long failed, long recordsRead, long recordsWritten,
+                        long recordsFailed, int running) {
+    }
+
+    public record Attention(Severity severity, String pipeline, String runId, String headline,
+                            String detail, Instant at) {
+    }
+
+    public record Board(Severity verdict, List<Live> live, Today today, List<Attention> attention,
+                        Instant generatedAt) {
+    }
+
     /** How loudly a finding should be read. */
     public enum Severity {
         INFO, WARNING, CRITICAL

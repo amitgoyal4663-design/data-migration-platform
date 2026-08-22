@@ -61,6 +61,63 @@ public class OperationsController {
                 clock.instant());
     }
 
+    @GetMapping("/board")
+    @Operation(summary = "Everything a wall display shows, in one call",
+            description = """
+                    For a screen in an office that nobody interacts with. One call, because a board
+                    refreshed on a timer forever must never show three quarters of the truth with
+                    nothing to say the last quarter is missing — a board that is wrong without
+                    admitting it is worse than a blank one.
+
+                    Covers every run, not only the watchlist. The watchlist keeps one person's
+                    morning screen small; a wall is read by whoever walks past, and a failure
+                    nobody thought to watch is exactly the one that should be up there.
+                    """)
+    public BoardResponse board(
+            @Parameter(description = "How far back failures and totals reach, in hours")
+            @RequestParam(defaultValue = "24") int hours) {
+
+        var board = dashboard.board(Duration.ofHours(Math.clamp(hours, 1, 24 * 7)));
+        return new BoardResponse(
+                board.verdict().name(),
+                board.live().stream().map(l -> new LiveResponse(l.runId(), l.pipeline(), l.state(),
+                        l.progress(), l.recordsRead(), l.recordsWritten(), l.seconds())).toList(),
+                new TodayResponse(board.today().completed(), board.today().failed(),
+                        board.today().recordsRead(), board.today().recordsWritten(),
+                        board.today().recordsFailed(), board.today().running()),
+                board.attention().stream().map(a -> new AttentionResponse(a.severity().name(),
+                        a.pipeline(), a.runId(), a.headline(), a.detail(), a.at())).toList(),
+                board.generatedAt());
+    }
+
+    @Schema(name = "StatusBoard")
+    public record BoardResponse(
+            @Schema(description = "INFO when nothing needs attention, else the loudest finding")
+            String verdict,
+            List<LiveResponse> live,
+            TodayResponse today,
+            @Schema(description = "Failures first, then anomalies, newest first within each")
+            List<AttentionResponse> attention,
+            Instant generatedAt) {
+    }
+
+    @Schema(name = "BoardLiveRun")
+    public record LiveResponse(String runId, String pipeline, String state,
+                               @Schema(description = "0 to 1; null before planning finishes")
+                               Double progress, long recordsRead, long recordsWritten,
+                               long seconds) {
+    }
+
+    @Schema(name = "BoardTotals")
+    public record TodayResponse(long completed, long failed, long recordsRead, long recordsWritten,
+                                long recordsFailed, int running) {
+    }
+
+    @Schema(name = "BoardAttention")
+    public record AttentionResponse(String severity, String pipeline, String runId, String headline,
+                                    String detail, Instant at) {
+    }
+
     @Schema(name = "OperationsDashboard")
     public record DashboardResponse(
             @Schema(description = "Worst first — a screen read every morning is scanned from the top")

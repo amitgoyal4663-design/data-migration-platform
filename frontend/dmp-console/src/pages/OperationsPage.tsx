@@ -51,6 +51,11 @@ export function OperationsPage() {
         subtitle={`${watched} pipeline${watched === 1 ? '' : 's'} watched · checked ${new Date(
           generatedAt,
         ).toLocaleTimeString()}`}
+        actions={
+          <Link href="/board" target="_blank" rel="noopener" underline="none">
+            Open the wall board
+          </Link>
+        }
       />
 
       {watched === 0 ? (

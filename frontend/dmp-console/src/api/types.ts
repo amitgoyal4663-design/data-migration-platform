@@ -130,6 +130,45 @@ export interface ChunkSummary {
   recordsAtRisk: number
 }
 
+export interface BoardLiveRun {
+  runId: string
+  pipeline: string
+  state: string
+  /** 0 to 1; null before planning finishes. */
+  progress: number | null
+  recordsRead: number
+  recordsWritten: number
+  seconds: number
+}
+
+export interface BoardTotals {
+  completed: number
+  failed: number
+  recordsRead: number
+  recordsWritten: number
+  recordsFailed: number
+  running: number
+}
+
+export interface BoardAttention {
+  severity: FindingSeverity
+  pipeline: string
+  runId: string | null
+  headline: string
+  detail: string
+  at: string
+}
+
+/** Everything a wall display shows, in one payload — see the endpoint on why it is one call. */
+export interface StatusBoard {
+  verdict: FindingSeverity
+  live: BoardLiveRun[]
+  today: BoardTotals
+  /** Failures first, then anomalies, newest first within each. */
+  attention: BoardAttention[]
+  generatedAt: string
+}
+
 /** How loudly a dashboard finding should be read. */
 export type FindingSeverity = 'INFO' | 'WARNING' | 'CRITICAL'
 
