@@ -27,11 +27,24 @@ const TYPES = [
 ]
 
 export interface Mapping {
-  from: string
+  /** One field, or several to join. Absent with a default means a constant. */
+  from?: string | string[]
   to: string
   type?: string
   required?: boolean
   default?: unknown
+  join?: string
+  /** Source value → destination value, for two systems with different words for one state. */
+  values?: Record<string, string>
+  otherwise?: string
+  trim?: boolean
+  case?: 'UPPER' | 'LOWER'
+  prefix?: string
+  suffix?: string
+  replace?: { find: string; with: string }
+  maxLength?: number
+  /** OMIT leaves the key out; NULL writes an explicit null, which clears a field on an upsert. */
+  onMissing?: 'OMIT' | 'NULL'
 }
 
 /**
@@ -95,65 +108,13 @@ export function MapperEditor({
       )}
 
       {mappings.map((mapping, index) => (
-        <Box
+        <MappingRow
           key={index}
-          sx={{ display: 'flex', gap: 1, alignItems: 'flex-start', flexWrap: 'wrap' }}
-        >
-          <TextField
-            label="From"
-            value={mapping.from}
-            onChange={(event) => update(index, { from: event.target.value })}
-            size="small"
-            disabled={readOnly}
-            placeholder="customer.address.city"
-            sx={{ flex: 1, minWidth: 150 }}
-          />
-          <TextField
-            label="To"
-            value={mapping.to}
-            onChange={(event) => update(index, { to: event.target.value })}
-            size="small"
-            disabled={readOnly}
-            sx={{ flex: 1, minWidth: 150 }}
-          />
-          <TextField
-            select
-            label="As"
-            value={mapping.type ?? 'AS_IS'}
-            onChange={(event) => update(index, { type: event.target.value })}
-            size="small"
-            disabled={readOnly}
-            sx={{ width: 130 }}
-          >
-            {TYPES.map((type) => (
-              <MenuItem key={type.value} value={type.value}>
-                {type.label}
-              </MenuItem>
-            ))}
-          </TextField>
-          <Tooltip title="Fail the record if this field is missing, naming this field">
-            <FormControlLabel
-              control={
-                <Checkbox
-                  size="small"
-                  checked={Boolean(mapping.required)}
-                  disabled={readOnly}
-                  onChange={(_, checked) => update(index, { required: checked })}
-                />
-              }
-              label={<Typography variant="caption">Required</Typography>}
-              sx={{ mr: 0 }}
-            />
-          </Tooltip>
-          {!readOnly && (
-            <IconButton
-              size="small"
-              onClick={() => set(mappings.filter((_, i) => i !== index))}
-            >
-              <DeleteIcon fontSize="small" />
-            </IconButton>
-          )}
-        </Box>
+          mapping={mapping}
+          readOnly={readOnly}
+          onChange={(changes) => update(index, changes)}
+          onRemove={() => set(mappings.filter((_, i) => i !== index))}
+        />
       ))}
 
       <FormControlLabel
@@ -182,7 +143,11 @@ export function MapperEditor({
           onUseRecord={(record) => {
             // Seeds a row per field, from the record's real shape rather than from memory. Targets
             // start equal to sources: renaming three of twelve is quicker than typing twelve.
-            const existing = new Set(mappings.map((mapping) => mapping.from))
+            const existing = new Set(
+              mappings.map((mapping) =>
+                Array.isArray(mapping.from) ? mapping.from.join(',') : (mapping.from ?? ''),
+              ),
+            )
             const added = Object.keys(record)
               .filter((field) => !existing.has(field))
               .map((field) => ({ from: field, to: field, type: 'AS_IS' }))
@@ -191,6 +156,258 @@ export function MapperEditor({
         />
       )}
     </Stack>
+  )
+}
+
+/**
+ * One mapping.
+ *
+ * The four things every mapping needs are on one line; everything else is behind "More", because a
+ * pipeline with twenty mappings that each showed ten inputs would be unreadable — and nineteen of
+ * the twenty are a rename and a type.
+ */
+function MappingRow({
+  mapping,
+  readOnly,
+  onChange,
+  onRemove,
+}: {
+  mapping: Mapping
+  readOnly: boolean
+  onChange: (changes: Partial<Mapping>) => void
+  onRemove: () => void
+}) {
+  const extras =
+    Boolean(mapping.default) ||
+    Boolean(mapping.values) ||
+    Boolean(mapping.trim) ||
+    Boolean(mapping.case) ||
+    Boolean(mapping.prefix) ||
+    Boolean(mapping.suffix) ||
+    Boolean(mapping.replace) ||
+    typeof mapping.maxLength === 'number' ||
+    mapping.onMissing === 'NULL'
+
+  const [open, setOpen] = useState(extras)
+  const fromText = Array.isArray(mapping.from) ? mapping.from.join(', ') : (mapping.from ?? '')
+
+  return (
+    <Box sx={{ pb: 1, borderBottom: '1px solid', borderColor: 'divider' }}>
+      <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <TextField
+          label="From"
+          value={fromText}
+          onChange={(event) => {
+            const raw = event.target.value
+            // A comma means "join these". Typed rather than a separate mode, because the moment
+            // somebody wants two fields they already know which two.
+            onChange({
+              from: raw.includes(',')
+                ? raw.split(',').map((part) => part.trim()).filter(Boolean)
+                : raw,
+            })
+          }}
+          size="small"
+          disabled={readOnly}
+          placeholder="customer.address.city"
+          helperText={
+            Array.isArray(mapping.from)
+              ? `joined with "${mapping.join ?? ' '}"`
+              : fromText.trim() === ''
+                ? 'empty = a constant, set a default below'
+                : undefined
+          }
+          sx={{ flex: 1, minWidth: 150 }}
+        />
+        <TextField
+          label="To"
+          value={mapping.to}
+          onChange={(event) => onChange({ to: event.target.value })}
+          size="small"
+          disabled={readOnly}
+          sx={{ flex: 1, minWidth: 150 }}
+        />
+        <TextField
+          select
+          label="As"
+          value={mapping.type ?? 'AS_IS'}
+          onChange={(event) => onChange({ type: event.target.value })}
+          size="small"
+          disabled={readOnly}
+          sx={{ width: 130 }}
+        >
+          {TYPES.map((type) => (
+            <MenuItem key={type.value} value={type.value}>
+              {type.label}
+            </MenuItem>
+          ))}
+        </TextField>
+        <Tooltip title="Fail the record if this ends up with no value, naming this field">
+          <FormControlLabel
+            control={
+              <Checkbox
+                size="small"
+                checked={Boolean(mapping.required)}
+                disabled={readOnly}
+                onChange={(_, checked) => onChange({ required: checked })}
+              />
+            }
+            label={<Typography variant="caption">Required</Typography>}
+            sx={{ mr: 0 }}
+          />
+        </Tooltip>
+        <Button size="small" onClick={() => setOpen(!open)} sx={{ minWidth: 64 }}>
+          {open ? 'Less' : extras ? 'More •' : 'More'}
+        </Button>
+        {!readOnly && (
+          <IconButton size="small" onClick={onRemove}>
+            <DeleteIcon fontSize="small" />
+          </IconButton>
+        )}
+      </Box>
+
+      {open && (
+        <Box sx={{ pl: 1, pt: 1, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+          <TextField
+            label="Default"
+            value={String(mapping.default ?? '')}
+            onChange={(event) => onChange({ default: event.target.value || undefined })}
+            size="small"
+            disabled={readOnly}
+            helperText="Used when the source has no value, or an empty one"
+            sx={{ minWidth: 170 }}
+          />
+          <TextField
+            label="Translate values"
+            value={
+              mapping.values
+                ? Object.entries(mapping.values).map(([k, v]) => `${k}=${v}`).join(', ')
+                : ''
+            }
+            onChange={(event) => {
+              const table: Record<string, string> = {}
+              for (const pair of event.target.value.split(',')) {
+                const [key, ...rest] = pair.split('=')
+                if (key?.trim() && rest.length) table[key.trim()] = rest.join('=').trim()
+              }
+              onChange({ values: Object.keys(table).length ? table : undefined })
+            }}
+            size="small"
+            disabled={readOnly}
+            placeholder="NEW=Open, SHIPPED=Closed"
+            helperText="Source value = destination value"
+            sx={{ flex: 1, minWidth: 230 }}
+          />
+          <TextField
+            label="Unlisted becomes"
+            value={mapping.otherwise ?? ''}
+            onChange={(event) => onChange({ otherwise: event.target.value || undefined })}
+            size="small"
+            disabled={readOnly}
+            helperText="Blank = pass through unchanged"
+            sx={{ minWidth: 160 }}
+          />
+          <TextField
+            label="Prefix"
+            value={mapping.prefix ?? ''}
+            onChange={(event) => onChange({ prefix: event.target.value || undefined })}
+            size="small"
+            disabled={readOnly}
+            sx={{ width: 110 }}
+          />
+          <TextField
+            label="Suffix"
+            value={mapping.suffix ?? ''}
+            onChange={(event) => onChange({ suffix: event.target.value || undefined })}
+            size="small"
+            disabled={readOnly}
+            sx={{ width: 110 }}
+          />
+          <TextField
+            label="Remove text"
+            value={mapping.replace?.find ?? ''}
+            onChange={(event) =>
+              onChange({
+                replace: event.target.value
+                  ? { find: event.target.value, with: mapping.replace?.with ?? '' }
+                  : undefined,
+              })
+            }
+            size="small"
+            disabled={readOnly}
+            placeholder="DBX-"
+            helperText="Exact text, not a pattern"
+            sx={{ width: 150 }}
+          />
+          <TextField
+            label="Replace with"
+            value={mapping.replace?.with ?? ''}
+            onChange={(event) =>
+              onChange({
+                replace: { find: mapping.replace?.find ?? '', with: event.target.value },
+              })
+            }
+            size="small"
+            disabled={readOnly || !mapping.replace?.find}
+            sx={{ width: 140 }}
+          />
+          <TextField
+            label="Max length"
+            value={mapping.maxLength ?? ''}
+            onChange={(event) =>
+              onChange({
+                maxLength: event.target.value ? Number(event.target.value) : undefined,
+              })
+            }
+            size="small"
+            disabled={readOnly}
+            helperText="Truncates rather than being refused"
+            sx={{ width: 130 }}
+          />
+          <TextField
+            select
+            label="Case"
+            value={mapping.case ?? ''}
+            onChange={(event) =>
+              onChange({ case: (event.target.value || undefined) as 'UPPER' | 'LOWER' | undefined })
+            }
+            size="small"
+            disabled={readOnly}
+            sx={{ width: 120 }}
+          >
+            <MenuItem value="">Leave as-is</MenuItem>
+            <MenuItem value="UPPER">UPPERCASE</MenuItem>
+            <MenuItem value="LOWER">lowercase</MenuItem>
+          </TextField>
+          <FormControlLabel
+            control={
+              <Checkbox
+                size="small"
+                checked={Boolean(mapping.trim)}
+                disabled={readOnly}
+                onChange={(_, checked) => onChange({ trim: checked || undefined })}
+              />
+            }
+            label={<Typography variant="caption">Trim spaces</Typography>}
+          />
+          <TextField
+            select
+            label="When there is no value"
+            value={mapping.onMissing ?? 'OMIT'}
+            onChange={(event) =>
+              onChange({ onMissing: event.target.value as 'OMIT' | 'NULL' })
+            }
+            size="small"
+            disabled={readOnly}
+            helperText="An explicit null clears the field on an upsert"
+            sx={{ minWidth: 230 }}
+          >
+            <MenuItem value="OMIT">Leave the field out</MenuItem>
+            <MenuItem value="NULL">Send an explicit null</MenuItem>
+          </TextField>
+        </Box>
+      )}
+    </Box>
   )
 }
 

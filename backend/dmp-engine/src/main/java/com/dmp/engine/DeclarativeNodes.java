@@ -67,38 +67,174 @@ final class DeclarativeNodes {
                 : "  var out = {};\n");
 
         for (JsonNode mapping : mappings) {
-            String from = text(mapping, "from");
             String to = text(mapping, "to");
-            if (from == null || to == null) {
+            JsonNode fallback = mapping.get("default");
+            boolean hasDefault = fallback != null && !fallback.isNull();
+
+            if (to == null) {
                 throw new DmpException(ErrorCode.VALIDATION_FAILED,
-                        "Every mapping in '" + node.name() + "' needs a source and a target field",
+                        "Every mapping in '" + node.name() + "' needs a target field",
                         Map.of("nodeId", node.id()));
             }
 
-            String type = mapping.path("type").asText("AS_IS");
-            boolean required = mapping.path("required").asBoolean(false);
-            JsonNode fallback = mapping.get("default");
-
             script.append("  {\n");
-            script.append("    var v = __get(record, ").append(quote(from)).append(");\n");
+            script.append(readStep(mapping, node, to, fallback, hasDefault));
 
-            if (fallback != null && !fallback.isNull()) {
-                script.append("    if (v === undefined || v === null) v = ")
-                        .append(fallback.toString()).append(";\n");
+            // Order matters and is fixed, because a mapping is data and the same data must mean the
+            // same thing every time. Read, fill in, translate, tidy, decorate, fit, convert:
+            //
+            //   default   before everything, so nothing downstream sees a missing value
+            //   values    on the source's own vocabulary, before it has been reshaped
+            //   trim      before case and length, so neither is measured against padding
+            //   case      before prefix, so a prefix keeps the case it was typed in
+            //   prefix    before truncate, so the limit applies to what is actually sent
+            //   truncate  before the type, so a length limit cannot produce an unparseable number
+            //   type      last, because it is the destination's requirement and not a text edit
+            if (mapping.has("values")) {
+                script.append("    v = __translate(v, ").append(valueMap(mapping, node))
+                        .append(", ").append(mapping.path("otherwise").isMissingNode()
+                                ? "undefined" : mapping.path("otherwise").toString())
+                        .append(");\n");
             }
-            if (required) {
-                // Named in the message, because this ends up as the failure signature that groups
-                // every record that hit it — "a transform threw" would group them all as one.
-                script.append("    if (v === undefined || v === null) throw new Error(")
-                        .append(quote(from + " is required and was missing")).append(");\n");
+            if (mapping.path("trim").asBoolean(false)) {
+                script.append("    v = __trim(v);\n");
             }
-            script.append("    v = ").append(coercion(type, node)).append(";\n");
-            script.append("    __set(out, ").append(quote(to)).append(", v);\n");
+            String letterCase = mapping.path("case").asText("");
+            if (!letterCase.isBlank()) {
+                script.append("    v = ").append(caseCall(letterCase, node)).append(";\n");
+            }
+            String prefix = text(mapping, "prefix");
+            if (prefix != null) {
+                script.append("    v = __affix(").append(quote(prefix)).append(", v, \"\");\n");
+            }
+            String suffix = text(mapping, "suffix");
+            if (suffix != null) {
+                script.append("    v = __affix(\"\", v, ").append(quote(suffix)).append(");\n");
+            }
+            if (mapping.has("replace")) {
+                JsonNode replace = mapping.path("replace");
+                String find = text(replace, "find");
+                if (find == null) {
+                    throw new DmpException(ErrorCode.VALIDATION_FAILED,
+                            "A replace in '" + node.name() + "' has nothing to find",
+                            Map.of("nodeId", node.id()));
+                }
+                // Literal, not a pattern. A regular expression in a form field is a support call
+                // waiting to happen, and every case seen so far is "strip this prefix".
+                script.append("    v = __replace(v, ").append(quote(find)).append(", ")
+                        .append(quote(replace.path("with").asText(""))).append(");\n");
+            }
+            if (mapping.path("maxLength").isNumber()) {
+                script.append("    v = __truncate(v, ")
+                        .append(mapping.path("maxLength").asText()).append(");\n");
+            }
+            if (mapping.path("required").asBoolean(false)) {
+                // Names both ends when they differ. The requirement belongs to the destination and
+                // the fix belongs in the source, so a message with only one of them sends somebody
+                // to the wrong system.
+                JsonNode fromNode = mapping.path("from");
+                String origin = fromNode.isArray()
+                        ? "joined fields"
+                        : (notBlank(fromNode) ? fromNode.asText().trim() : null);
+                String complaint = origin == null || origin.equals(to)
+                        ? to + " is required and had no value"
+                        : to + " is required and had no value (from " + origin + ")";
+                script.append("    if (v === undefined || v === null || v === '') throw new Error(")
+                        .append(quote(complaint)).append(");\n");
+            }
+            script.append("    v = ").append(coercion(mapping.path("type").asText("AS_IS"), node))
+                    .append(";\n");
+
+            // OMIT is the default, because the two are not interchangeable at the destination: a
+            // Salesforce update sent an explicit null clears the field, while an absent key leaves
+            // whatever is there. Writing null by default would silently erase data on an upsert.
+            if ("NULL".equals(mapping.path("onMissing").asText("OMIT"))) {
+                // An explicit null, not undefined. Setting undefined creates the key and JSON then
+                // drops it, so the field would be absent — which is the behaviour this option
+                // exists to opt out of.
+                script.append("    __set(out, ").append(quote(to))
+                        .append(", v === undefined ? null : v);\n");
+            } else {
+                script.append("    if (v !== undefined && v !== null) __set(out, ")
+                        .append(quote(to)).append(", v);\n");
+            }
             script.append("  }\n");
         }
 
         script.append("  return out;\n}\n");
         return script.toString();
+    }
+
+    /**
+     * How the value is obtained: one field, several joined, or a constant.
+     *
+     * <p>Joining exists because "first name and last name into one field" is not logic anybody
+     * should open a script for, and it is asked for on nearly every migration.
+     */
+    private static String readStep(JsonNode mapping, NodeDefinition node, String to,
+                                   JsonNode fallback, boolean hasDefault) {
+        JsonNode from = mapping.path("from");
+        StringBuilder step = new StringBuilder();
+
+        if (from.isArray() && !from.isEmpty()) {
+            List<String> paths = new ArrayList<>();
+            from.forEach(entry -> paths.add(quote(entry.asText())));
+            step.append("    var v = __join([").append(String.join(",", paths)).append("], record, ")
+                    .append(quote(mapping.path("join").asText(" "))).append(");\n");
+
+        } else if (notBlank(from)) {
+            step.append("    var v = __get(record, ").append(quote(from.asText().trim()))
+                    .append(");\n");
+
+        } else if (hasDefault) {
+            // A mapping with no source but a default is a constant, and it is one of the commonest
+            // things a migration needs: stamp every record with the system it came from, a record
+            // type, an owner, a load id.
+            return "    var v = " + fallback.toString() + ";\n";
+
+        } else {
+            throw new DmpException(ErrorCode.VALIDATION_FAILED,
+                    "The mapping to '" + to + "' in '" + node.name() + "' has neither a source "
+                            + "field nor a default value, so there is nothing to put there.",
+                    Map.of("nodeId", node.id(), "to", to));
+        }
+
+        if (hasDefault) {
+            // Before everything else, so nothing downstream has to cope with a missing value — and
+            // so "default plus required" means "must end up with a value" rather than contradicting
+            // itself.
+            step.append("    if (v === undefined || v === null || v === '') v = ")
+                    .append(fallback.toString()).append(";\n");
+        }
+        return step.toString();
+    }
+
+    private static boolean notBlank(JsonNode node) {
+        return node != null && node.isTextual() && !node.asText().isBlank();
+    }
+
+    private static String caseCall(String letterCase, NodeDefinition node) {
+        return switch (letterCase.toUpperCase()) {
+            case "UPPER" -> "__upper(v)";
+            case "LOWER" -> "__lower(v)";
+            default -> throw new DmpException(ErrorCode.VALIDATION_FAILED,
+                    "Mapper '" + node.name() + "' asks for case '" + letterCase
+                            + "', which is not UPPER or LOWER", Map.of("nodeId", node.id()));
+        };
+    }
+
+    /** The translation table, as a JavaScript object literal keyed by the source's own values. */
+    private static String valueMap(JsonNode mapping, NodeDefinition node) {
+        JsonNode values = mapping.path("values");
+        if (!values.isObject() || values.isEmpty()) {
+            throw new DmpException(ErrorCode.VALIDATION_FAILED,
+                    "A value translation in '" + node.name() + "' is empty",
+                    Map.of("nodeId", node.id()));
+        }
+        List<String> pairs = new ArrayList<>();
+        values.properties().forEach(entry ->
+                pairs.add(quote(entry.getKey()) + ":" + entry.getValue().toString()));
+        return "{" + String.join(",", pairs) + "}";
     }
 
     /**
@@ -239,6 +375,34 @@ final class DeclarativeNodes {
               target[parts[parts.length - 1]] = value;
             }
             function __present(v) { return v !== null && v !== undefined; }
+            function __join(paths, record, separator) {
+              var parts = [];
+              for (var i = 0; i < paths.length; i++) {
+                var piece = __get(record, paths[i]);
+                if (__present(piece) && String(piece) !== '') parts.push(String(piece));
+              }
+              return parts.length === 0 ? undefined : parts.join(separator);
+            }
+            function __translate(v, table, otherwise) {
+              if (!__present(v)) return v;
+              var key = String(v);
+              if (Object.prototype.hasOwnProperty.call(table, key)) return table[key];
+              return otherwise === undefined ? v : otherwise;
+            }
+            function __trim(v) { return __present(v) ? String(v).trim() : v; }
+            function __upper(v) { return __present(v) ? String(v).toUpperCase() : v; }
+            function __lower(v) { return __present(v) ? String(v).toLowerCase() : v; }
+            function __affix(before, v, after) {
+              return __present(v) ? before + String(v) + after : v;
+            }
+            function __replace(v, find, with_) {
+              return __present(v) ? String(v).split(find).join(with_) : v;
+            }
+            function __truncate(v, limit) {
+              if (!__present(v)) return v;
+              var s = String(v);
+              return s.length <= limit ? s : s.substring(0, limit);
+            }
             function __string(v) { return __present(v) ? String(v) : v; }
             function __isNumber(v) { return __present(v) && v !== '' && !isNaN(Number(v)); }
             function __number(v) {

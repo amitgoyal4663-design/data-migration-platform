@@ -137,17 +137,65 @@ class DeclarativeNodesTest {
         }
 
         @Test
+        @DisplayName("writes a constant when a mapping has a default and no source")
+        void constantMapping() {
+            // One of the commonest things a migration needs: stamp every record with where it came
+            // from, a record type, a load id. Requiring a source field would force a script for the
+            // simplest possible operation.
+            JsonNode out = map("""
+                    {"mappings": [
+                      {"to": "Source__c", "default": "MIGRATION"},
+                      {"to": "Attempt__c", "default": "1", "type": "INTEGER"},
+                      {"from": "order_id", "to": "Ref__c"}
+                    ]}
+                    """, """
+                    {"order_id": "DBX-1"}
+                    """);
+
+            assertThat(out.path("Source__c").asText()).isEqualTo("MIGRATION");
+            // The declared type applies to a default as well, so "1" typed into a form arrives as a
+            // number rather than as the string the form gave us.
+            assertThat(out.path("Attempt__c").isNumber()).isTrue();
+            assertThat(out.path("Ref__c").asText()).isEqualTo("DBX-1");
+        }
+
+        @Test
+        @DisplayName("treats an empty string as missing, so a default fills it")
+        void blankCountsAsMissing() {
+            // A warehouse returning '' for an absent value is at least as common as returning null,
+            // and a default that only fired on null would leave the blank to travel onwards.
+            JsonNode out = map("""
+                    {"mappings": [{"from": "region", "to": "Region__c", "default": "UNKNOWN"}]}
+                    """, """
+                    {"region": ""}
+                    """);
+
+            assertThat(out.path("Region__c").asText()).isEqualTo("UNKNOWN");
+        }
+
+        @Test
+        @DisplayName("refuses a mapping with neither a source nor a default")
+        void refusesAnEmptyMapping() {
+            assertThatThrownBy(() -> DeclarativeNodes.mapperScript(node(NodeType.MAPPER,
+                    "{\"mappings\": [{\"to\": \"Nowhere__c\"}]}")))
+                    .isInstanceOf(DmpException.class)
+                    .hasMessageContaining("nothing to put there");
+        }
+
+        @Test
         @DisplayName("names the field when a required one is missing, so failures group by field")
         void namesTheMissingField() {
             // The message becomes the failure signature. "A transform threw" would group every
             // missing field in the pipeline under one heading.
             assertThatThrownBy(() -> map("""
-                    {"mappings": [{"from": "email", "to": "Email", "required": true}]}
+                    {"mappings": [{"from": "email", "to": "Email__c", "required": true}]}
                     """, """
                     {"name": "no email here"}
                     """))
                     .isInstanceOf(TransformException.class)
-                    .hasMessageContaining("email is required");
+                    // Both ends: the requirement is the destination's, the fix is in the source.
+                    .hasMessageContaining("Email__c is required")
+                    .hasMessageContaining("from email");
         }
 
         @Test
@@ -163,6 +211,107 @@ class DeclarativeNodesTest {
                     + "\"}]}", "{\"ok\": 1}");
 
             assertThat(out.path(dangerous).asInt()).isEqualTo(1);
+        }
+
+        @Test
+        @DisplayName("translates the source's vocabulary into the destination's")
+        void translatesValues() {
+            // The single most common thing after a rename: two systems with different words for the
+            // same state. Static, so it belongs here rather than in a lookup against anything.
+            JsonNode out = map("""
+                    {"mappings": [{"from": "status", "to": "Stage__c",
+                      "values": {"NEW": "Open", "SHIPPED": "Closed Won"},
+                      "otherwise": "Unknown"}]}
+                    """, """
+                    {"status": "SHIPPED"}
+                    """);
+            assertThat(out.path("Stage__c").asText()).isEqualTo("Closed Won");
+
+            // A value not in the table takes the fallback. Without "otherwise" it passes through
+            // unchanged, which is the right default — a partial table should not blank the rest.
+            JsonNode unlisted = map("""
+                    {"mappings": [{"from": "status", "to": "Stage__c",
+                      "values": {"NEW": "Open"}, "otherwise": "Unknown"}]}
+                    """, "{\"status\": \"CANCELLED\"}");
+            assertThat(unlisted.path("Stage__c").asText()).isEqualTo("Unknown");
+
+            JsonNode passthrough = map("""
+                    {"mappings": [{"from": "status", "to": "Stage__c", "values": {"NEW": "Open"}}]}
+                    """, "{\"status\": \"CANCELLED\"}");
+            assertThat(passthrough.path("Stage__c").asText()).isEqualTo("CANCELLED");
+        }
+
+        @Test
+        @DisplayName("trims, cases, affixes, replaces and truncates in a fixed order")
+        void tidiesText() {
+            JsonNode out = map("""
+                    {"mappings": [
+                      {"from": "code", "to": "Code__c", "trim": true, "case": "UPPER",
+                       "prefix": "MIG-"},
+                      {"from": "order_id", "to": "Ref__c",
+                       "replace": {"find": "DBX-", "with": ""}},
+                      {"from": "note", "to": "Note__c", "maxLength": 8}
+                    ]}
+                    """, """
+                    {"code": "  ab-9 ", "order_id": "DBX-100042",
+                     "note": "far too long for the destination"}
+                    """);
+
+            // Trim before case before prefix: the prefix keeps the case it was typed in, and the
+            // length limit applies to what is actually sent rather than to the raw value.
+            assertThat(out.path("Code__c").asText()).isEqualTo("MIG-AB-9");
+            assertThat(out.path("Ref__c").asText()).isEqualTo("100042");
+            assertThat(out.path("Note__c").asText()).isEqualTo("far too ");
+        }
+
+        @Test
+        @DisplayName("joins several source fields into one")
+        void joinsFields() {
+            // "First name and last name into one field" is not logic anybody should open a script
+            // for, and it is asked for on nearly every migration.
+            JsonNode out = map("""
+                    {"mappings": [{"from": ["first", "last"], "to": "Name", "join": " "}]}
+                    """, """
+                    {"first": "Asha", "last": "Rao"}
+                    """);
+            assertThat(out.path("Name").asText()).isEqualTo("Asha Rao");
+
+            // A missing part is skipped rather than leaving a dangling separator.
+            JsonNode partial = map("""
+                    {"mappings": [{"from": ["first", "last"], "to": "Name", "join": " "}]}
+                    """, "{\"first\": \"Asha\"}");
+            assertThat(partial.path("Name").asText()).isEqualTo("Asha");
+        }
+
+        @Test
+        @DisplayName("omits an absent field rather than writing null, unless told otherwise")
+        void omitsRatherThanNulling() {
+            // Not interchangeable at the destination: a Salesforce update sent an explicit null
+            // clears the field, while an absent key leaves what is there. Writing null by default
+            // would silently erase data on an upsert.
+            JsonNode omitted = map("""
+                    {"mappings": [{"from": "missing", "to": "Region__c"}]}
+                    """, "{}");
+            assertThat(omitted.has("Region__c")).isFalse();
+
+            JsonNode nulled = map("""
+                    {"mappings": [{"from": "missing", "to": "Region__c", "onMissing": "NULL"}]}
+                    """, "{}");
+            assertThat(nulled.has("Region__c")).isTrue();
+            assertThat(nulled.path("Region__c").isNull()).isTrue();
+        }
+
+        @Test
+        @DisplayName("names the target when a required field ends up with no value")
+        void requiredAfterEverythingElse() {
+            // Checked after the default, the translation and the trim, so "required" means "ended
+            // up with a value" rather than "was present in the source".
+            assertThatThrownBy(() -> map("""
+                    {"mappings": [{"from": "region", "to": "Region__c", "trim": true,
+                                   "required": true}]}
+                    """, "{\"region\": \"   \"}"))
+                    .isInstanceOf(TransformException.class)
+                    .hasMessageContaining("Region__c is required");
         }
 
         @Test
