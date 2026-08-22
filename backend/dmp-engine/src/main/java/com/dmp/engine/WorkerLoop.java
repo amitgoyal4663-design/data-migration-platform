@@ -78,6 +78,7 @@ public class WorkerLoop {
     private final RunEventPublisher events;
     private final com.dmp.engine.schedule.ExternalJobScheduler externalJobs;
     private final RateLimitGate rateLimits;
+    private final EngineMetrics metrics;
     private final Clock clock;
 
     private final String workerId;
@@ -124,6 +125,7 @@ public class WorkerLoop {
                       com.dmp.engine.schedule.ExternalJobScheduler externalJobs,
                       com.dmp.application.port.out.RateLimiter rateLimiter,
                       com.dmp.connector.runtime.ConnectorRegistry connectors,
+                      EngineMetrics metrics,
                       Clock clock,
                       @Value("${dmp.worker.id:}") String configuredWorkerId,
                       @Value("${dmp.worker.max-concurrent-chunks:4}") int maxConcurrentChunks,
@@ -138,6 +140,7 @@ public class WorkerLoop {
         this.events = events;
         this.externalJobs = externalJobs;
         this.rateLimits = new RateLimitGate(rateLimiter, connectors);
+        this.metrics = metrics;
         this.clock = clock;
         this.workerId = configuredWorkerId == null || configuredWorkerId.isBlank()
                 ? defaultWorkerId() : configuredWorkerId;
@@ -360,6 +363,10 @@ public class WorkerLoop {
             // worker goes and finds another run rather than sitting on a slot waiting.
             Optional<Duration> holdFor = rateLimits.reserve(pipeline, split.hasExternalJob());
             if (holdFor.isPresent()) {
+                // Counted, because a rate limit doing its job and a rate limit set so low that
+                // nothing ever runs look identical from every other measure: no errors, no failed
+                // chunks, and a run that simply takes longer than anybody expected.
+                metrics.deferred("rate_limit");
                 defer(run, split, holdFor.get());
                 return;
             }

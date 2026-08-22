@@ -95,6 +95,7 @@ public class ChunkExecutor {
     private final TransformFactory transforms;
     private final ReplaySource replaySource;
     private final Clock clock;
+    private final EngineMetrics metrics;
 
     public ChunkExecutor(ConnectorRegistry connectors,
                          ConnectorContexts contexts,
@@ -106,6 +107,29 @@ public class ChunkExecutor {
                          TransformFactory transforms,
                          ReplaySource replaySource,
                          Clock clock) {
+        this(connectors, contexts, checkpoints, splits, recordErrors, recordIndex, stageLog,
+                transforms, replaySource, clock, EngineMetrics.NONE);
+    }
+
+    /**
+     * The instrumented form, which is the one Spring wires.
+     *
+     * <p>An overload rather than an extra argument on the only constructor, because five call sites
+     * build this directly and instrumentation must never be the reason a component becomes harder
+     * to construct — the next person would simply skip it.
+     */
+    public ChunkExecutor(ConnectorRegistry connectors,
+                         ConnectorContexts contexts,
+                         CheckpointRepository checkpoints,
+                         SplitRepository splits,
+                         RecordErrorPort recordErrors,
+                         RecordIndexPort recordIndex,
+                         StageLogPort stageLog,
+                         TransformFactory transforms,
+                         ReplaySource replaySource,
+                         Clock clock,
+                         EngineMetrics metrics) {
+        this.metrics = metrics == null ? EngineMetrics.NONE : metrics;
         this.connectors = connectors;
         this.contexts = contexts;
         this.checkpoints = checkpoints;
@@ -134,6 +158,40 @@ public class ChunkExecutor {
      * deliberately: a stop that waits is easier to explain than a chunk that half happened.
      */
     public ChunkResult execute(ResolvedPipeline pipeline, Split split, String workerId) {
+        // Wrapped rather than measured inline, because a chunk has half a dozen ways out — three
+        // exception paths, a park, a shortfall — and instrumenting each one is how a meter ends up
+        // counting five of the six.
+        Instant chunkStarted = clock.instant();
+        try (AutoCloseable inFlight = metrics.inFlight()) {
+            ChunkResult result = run(pipeline, split, workerId);
+            // "completed" covers a chunk that finished, however many records it lost on the way —
+            // the losses are counted separately, and conflating them would make the outcome tag
+            // mean two different things.
+            metrics.chunk("completed", Duration.between(chunkStarted, clock.instant()));
+            String source = pipeline.sourceInstance().connectorType();
+            metrics.records("read", source, result.recordsRead());
+            metrics.records("filtered", source, result.recordsFiltered());
+            return result;
+
+        } catch (LeaseLostException e) {
+            // Its own meter, because it is silent everywhere else and it means the lease is too
+            // short for the work — which, left alone, produces duplicate writes rather than errors.
+            metrics.leaseLost();
+            metrics.chunk("lease_lost", Duration.between(chunkStarted, clock.instant()));
+            throw e;
+        } catch (ChunkParkedException e) {
+            metrics.chunk("parked", Duration.between(chunkStarted, clock.instant()));
+            throw e;
+        } catch (RuntimeException e) {
+            metrics.chunk("failed", Duration.between(chunkStarted, clock.instant()));
+            throw e;
+        } catch (Exception e) {
+            // Only the in-flight gauge's close() declares this, and it does not throw.
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private ChunkResult run(ResolvedPipeline pipeline, Split split, String workerId) {
 
         // A chunk carrying a remote job handle has already read everything it is going to read and
         // has already handed it over. It is here to be settled, not re-executed.
@@ -678,12 +736,22 @@ public class ChunkExecutor {
     private Sink.WriteResult callSink(Sink.SinkSession sinkSession, RecordBatch batch,
                                       StageRecorder stages, Split split) {
         RuntimeException last = null;
+        String destination = stages.pipeline.sinkInstance().connectorType();
 
         for (int attempt = 1; attempt <= SINK_CALL_ATTEMPTS; attempt++) {
             stages.sinkCalls++;
+            // Measured per attempt, not per batch. A destination that fails twice and succeeds on
+            // the third is three calls, and averaging them into one would hide both the failures
+            // and how long they took to fail — which is the shape of an outage.
+            Instant callStarted = clock.instant();
             try {
-                return sinkSession.write(batch);
+                Sink.WriteResult result = sinkSession.write(batch);
+                metrics.sinkCall(destination, Duration.between(callStarted, clock.instant()), true);
+                metrics.records("written", destination, result.written());
+                metrics.records("refused", destination, result.failed());
+                return result;
             } catch (RuntimeException e) {
+                metrics.sinkCall(destination, Duration.between(callStarted, clock.instant()), false);
                 last = e;
                 boolean worthRetrying = e instanceof com.dmp.connector.api.ConnectorException connector
                         && connector.isRetryable();
@@ -1410,6 +1478,14 @@ public class ChunkExecutor {
          * the whole read window to the last call in it.
          */
         void fetches(List<Source.Fetch> fetches) {
+            for (Source.Fetch fetch : fetches) {
+                // Metered whatever the audit policy says. A stage-log entry is opt-in because it
+                // holds bodies; a duration and a count are neither sensitive nor large, and the
+                // question "is that source slower than last week" cannot be answered after the
+                // fact from a store nobody switched on.
+                metrics.sourceFetch(pipeline.sourceInstance().connectorType(),
+                        java.time.Duration.ofMillis(fetch.durationMillis()), fetch.succeeded());
+            }
             for (Source.Fetch fetch : fetches) {
                 // Narrated whatever the audit policy says. The stage log is a store somebody
                 // chose to switch on and pays for; this is the debug log, and a developer who has

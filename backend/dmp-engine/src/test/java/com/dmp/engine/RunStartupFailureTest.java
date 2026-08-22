@@ -95,6 +95,7 @@ class RunStartupFailureTest {
         worker = new WorkerLoop(runs, splits, checkpoints, planner, orchestrator, executor, events,
                 externalJobs, GRANTS_EVERYTHING,
                 new com.dmp.connector.runtime.ConnectorRegistry("plugins"),
+                EngineMetrics.NONE,
                 Clock.fixed(NOW, ZoneOffset.UTC), "worker-1", 4,
                 Duration.ofSeconds(5), Duration.ofMillis(200));
 
