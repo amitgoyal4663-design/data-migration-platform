@@ -8,6 +8,7 @@ import { ConnectorsPage } from './pages/ConnectorsPage'
 import { RunsPage } from './pages/RunsPage'
 import { RunDetailPage } from './pages/RunDetailPage'
 import { SchedulesPage } from './pages/SchedulesPage'
+import { NotifiersPage } from './pages/NotifiersPage'
 import { RecordSearchPage } from './pages/RecordSearchPage'
 import { AuditPage } from './pages/AuditPage'
 
@@ -22,6 +23,7 @@ export const router = createBrowserRouter([
       { path: 'pipelines/:pipelineId/versions/:versionId/design', element: <DesignerPage /> },
       { path: 'connectors', element: <ConnectorsPage /> },
       { path: 'schedules', element: <SchedulesPage /> },
+      { path: 'notifications', element: <NotifiersPage /> },
       { path: 'runs', element: <RunsPage /> },
       { path: 'runs/:runId', element: <RunDetailPage /> },
       { path: 'records', element: <RecordSearchPage /> },

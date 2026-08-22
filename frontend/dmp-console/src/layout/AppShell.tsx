@@ -18,6 +18,7 @@ import CableIcon from '@mui/icons-material/CableOutlined'
 import HistoryIcon from '@mui/icons-material/HistoryOutlined'
 import SearchIcon from '@mui/icons-material/ManageSearchOutlined'
 import GavelIcon from '@mui/icons-material/GavelOutlined'
+import NotificationsIcon from '@mui/icons-material/NotificationsOutlined'
 import ScheduleIcon from '@mui/icons-material/ScheduleOutlined'
 import DarkModeIcon from '@mui/icons-material/DarkModeOutlined'
 import LightModeIcon from '@mui/icons-material/LightModeOutlined'
@@ -32,6 +33,7 @@ const NAV = [
   { to: '/pipelines', label: 'Pipelines', Icon: AccountTreeIcon },
   { to: '/connectors', label: 'Connectors', Icon: CableIcon },
   { to: '/schedules', label: 'Schedules', Icon: ScheduleIcon },
+  { to: '/notifications', label: 'Notifications', Icon: NotificationsIcon },
   { to: '/runs', label: 'Runs', Icon: HistoryIcon },
   { to: '/records', label: 'Find a record', Icon: SearchIcon },
   { to: '/audit', label: 'Audit trail', Icon: GavelIcon },

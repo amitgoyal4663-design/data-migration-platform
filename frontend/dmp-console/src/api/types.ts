@@ -200,6 +200,40 @@ export interface SourcePreview {
   more: boolean
 }
 
+/** The outcomes worth telling somebody about. Fewer than the run lifecycle has, deliberately. */
+export type NotifierEvent =
+  | 'RUN_FAILED'
+  /** Finished, but records were refused or a script threw. The outcome that goes unnoticed. */
+  | 'RUN_COMPLETED_WITH_FAILURES'
+  | 'RUN_COMPLETED'
+  | 'RUN_STOPPED'
+
+export interface Notifier {
+  id: string
+  name: string
+  url: string
+  /** One pipeline, or null for every pipeline in the tenant. */
+  pipelineId: string | null
+  events: NotifierEvent[]
+  secretHeader: string | null
+  /** The reference, such as env:SLACK_TOKEN. Never the value. */
+  secretRef: string | null
+  enabled: boolean
+  description: string | null
+  /**
+   * When this last tried to deliver.
+   *
+   * Shown because the commonest way alerting fails is silently: a rotated URL answers 404 forever
+   * and nobody notices, because the thing that would say so is the thing that is broken.
+   */
+  lastAttemptAt: string | null
+  lastAttemptSucceeded: boolean
+  lastAttemptError: string | null
+  createdAt: string
+  updatedAt: string
+  rowVersion: number
+}
+
 /** 0 = unlimited, 1 = strictly sequential, N = exactly N chunks in flight across the fleet. */
 export interface ExecutionPolicy {
   maxConcurrentChunks: number

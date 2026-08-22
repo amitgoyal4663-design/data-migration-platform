@@ -23,6 +23,8 @@ import type {
   PipelineVersion,
   PipelineVersionSummary,
   RateLimit,
+  Notifier,
+  NotifierEvent,
   RecordError,
   Reconciliation,
   SourcePreview,
@@ -298,6 +300,58 @@ export function usePreviewSource() {
         `/api/v1/connector-instances/${connectorInstanceId}/preview?limit=${limit}`,
         parameters && Object.keys(parameters).length > 0 ? parameters : undefined,
       ),
+  })
+}
+
+export interface NotifierRequest {
+  name: string
+  url: string
+  pipelineId: string | null
+  events: NotifierEvent[]
+  secretHeader: string | null
+  secretRef: string | null
+  enabled?: boolean
+  description: string | null
+}
+
+export function useNotifiers() {
+  return useQuery({
+    queryKey: ['notifiers'],
+    queryFn: () => api.get<Notifier[]>('/api/v1/notifiers'),
+  })
+}
+
+export function useSaveNotifier() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, ...body }: NotifierRequest & { id?: string }) =>
+      id
+        ? api.put<Notifier>(`/api/v1/notifiers/${id}`, body)
+        : api.post<Notifier>('/api/v1/notifiers', body),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['notifiers'] }),
+  })
+}
+
+export function useDeleteNotifier() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.delete(`/api/v1/notifiers/${id}`),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['notifiers'] }),
+  })
+}
+
+/**
+ * Sends one message now.
+ *
+ * Invalidates the list afterwards because the attempt is recorded on the notifier — the point of
+ * the button is to make "does this actually work" visible, not to answer it once and forget.
+ */
+export function useTestNotifier() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      api.post<{ delivered: boolean; error: string | null }>(`/api/v1/notifiers/${id}/test`),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['notifiers'] }),
   })
 }
 
