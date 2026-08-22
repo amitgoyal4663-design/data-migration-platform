@@ -124,7 +124,7 @@ public class RunPlanner {
                 .findAllById(run.tenantId(), referenced).stream()
                 .collect(Collectors.toMap(instance -> instance.id().toString(), Function.identity()));
 
-        return ResolvedPipeline.resolve(version, instances, run.parameters());
+        return ResolvedPipeline.resolve(version, instances, run.parameters(), run.dryRun());
     }
 
     /**

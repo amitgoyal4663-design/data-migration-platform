@@ -144,6 +144,18 @@ public class RunOrchestrator {
      */
     public Run start(PipelineId pipelineId, RunTrigger trigger, String idempotencyKey,
                      com.fasterxml.jackson.databind.JsonNode parameters) {
+        return start(pipelineId, trigger, idempotencyKey, parameters, false);
+    }
+
+    /**
+     * Starts a run that reads and transforms everything and writes nothing.
+     *
+     * <p>Decided here rather than on the pipeline version, so the rehearsal and the real thing
+     * execute the same published version — which is the only arrangement in which rehearsing means
+     * anything.
+     */
+    public Run start(PipelineId pipelineId, RunTrigger trigger, String idempotencyKey,
+                     com.fasterxml.jackson.databind.JsonNode parameters, boolean dryRun) {
         TenantId tenantId = tenantContext.currentTenant();
         Instant now = clock.instant();
 
@@ -175,17 +187,19 @@ public class RunOrchestrator {
 
         Run run = runs.create(Run.create(tenantId, pipelineId, version.id(), versionNumber,
                 version.mode(), trigger, idempotencyKey, tenantContext.currentActor(), null,
-                parameters, now));
+                parameters, dryRun, now));
 
         auditLog.record(AuditEntry.of(tenantId, tenantContext.currentActor(), AuditAction.RUN_START,
                 "run", run.id().toString(),
-                "Started run of '" + pipeline.name() + "' version " + versionNumber,
+                (dryRun ? "Started a dry run of '" : "Started run of '")
+                        + pipeline.name() + "' version " + versionNumber,
                 null, null, now));
 
         publish(RunEventPublisher.Type.RUN_CREATED, run, pipeline.name(),
-                Map.of("trigger", trigger.name()));
+                Map.of("trigger", trigger.name(), "dryRun", dryRun));
 
-        log.info("Created run {} for pipeline '{}' version {}", run.id(), pipeline.name(), versionNumber);
+        log.info("Created {}run {} for pipeline '{}' version {}",
+                dryRun ? "dry " : "", run.id(), pipeline.name(), versionNumber);
         return run;
     }
 

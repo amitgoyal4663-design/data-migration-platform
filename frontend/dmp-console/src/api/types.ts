@@ -173,6 +173,8 @@ export interface Reconciliation {
   complete: boolean
   runId: string
   pipelineName: string
+  /** These numbers describe a rehearsal. Carried here because the CSV is read away from the page. */
+  dryRun: boolean
   generatedAt: string
 }
 
@@ -420,6 +422,13 @@ export interface RunMetrics {
 
 export interface Run {
   id: string
+  /**
+   * This run rehearsed rather than delivered: read and transformed everything, wrote nothing.
+   *
+   * Its records are deliberately absent from the record index — "would have been transferred"
+   * must never be searchable as "was transferred".
+   */
+  dryRun: boolean
   pipelineId: string
   pipelineVersionId: string
   versionNumber: number

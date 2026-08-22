@@ -214,7 +214,7 @@ class RunReaperTest {
         return new Run(run.id(), run.tenantId(), run.pipelineId(), run.pipelineVersionId(),
                 run.versionNumber(), run.mode(), run.trigger(), run.retryOf(), run.state(),
                 run.idempotencyKey(),
-                run.metrics(), 1, run.preparationState(), run.parameters(),
+                run.metrics(), 1, run.preparationState(), run.parameters(), run.dryRun(),
                 run.errorCode(), run.errorMessage(),
                 run.triggeredBy(), run.createdAt(), run.startedAt(), run.endedAt(),
                 run.updatedAt(), run.rowVersion());

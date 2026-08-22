@@ -51,7 +51,14 @@ public record ResolvedPipeline(
          * record already exists to be "everything resolved once when the run starts" and a run's
          * parameters are exactly that: fixed for its whole life, identical for every chunk.
          */
-        JsonNode runParameters) {
+        JsonNode runParameters,
+        /**
+         * Whether this run rehearses rather than delivers. See {@code Run.dryRun}.
+         *
+         * <p>Carried here for the same reason everything else is: fixed for the run's whole life,
+         * identical for every chunk, resolved once.
+         */
+        boolean dryRun) {
 
     /**
      * Ceiling on how long one invocation of a user's script may run.
@@ -65,6 +72,23 @@ public record ResolvedPipeline(
         transforms = List.copyOf(transforms == null ? List.of() : transforms);
     }
 
+    /**
+     * Everything except {@code dryRun}, which defaults to a real delivery.
+     *
+     * <p>Kept so that constructing this directly — which several tests and two production paths do
+     * — does not have to name a flag that is false in every case but one. The safe default is also
+     * the right one to have to opt out of: a caller that forgot this argument delivers, rather than
+     * silently rehearsing a migration somebody is waiting on.
+     */
+    public ResolvedPipeline(PipelineVersion version, NodeDefinition sourceNode,
+                            ConnectorInstance sourceInstance, NodeDefinition sinkNode,
+                            ConnectorInstance sinkInstance, List<TransformSpec> transforms,
+                            ChunkingPolicy chunking, ExecutionPolicy execution, AuditPolicy audit,
+                            JsonNode runParameters) {
+        this(version, sourceNode, sourceInstance, sinkNode, sinkInstance, transforms, chunking,
+                execution, audit, runParameters, false);
+    }
+
     public static ResolvedPipeline resolve(PipelineVersion version,
                                            Map<String, ConnectorInstance> instancesById) {
         return resolve(version, instancesById, com.dmp.common.json.Json.emptyObject());
@@ -73,6 +97,13 @@ public record ResolvedPipeline(
     public static ResolvedPipeline resolve(PipelineVersion version,
                                            Map<String, ConnectorInstance> instancesById,
                                            JsonNode runParameters) {
+        return resolve(version, instancesById, runParameters, false);
+    }
+
+    public static ResolvedPipeline resolve(PipelineVersion version,
+                                           Map<String, ConnectorInstance> instancesById,
+                                           JsonNode runParameters,
+                                           boolean dryRun) {
 
         List<NodeDefinition> sources = version.definition().nodesOfType(NodeType.SOURCE);
         List<NodeDefinition> sinks = version.definition().nodesOfType(NodeType.SINK);
@@ -96,8 +127,9 @@ public record ResolvedPipeline(
                 transformChain(version, sourceNode, sinkNode),
                 version.chunkingPolicy(),
                 version.executionPolicy(),
-                auditPolicyFor(version.auditPolicy(), sinkInstance),
-                com.dmp.common.json.Json.orEmpty(runParameters));
+                auditPolicyFor(version.auditPolicy(), sinkInstance, dryRun),
+                com.dmp.common.json.Json.orEmpty(runParameters),
+                dryRun);
     }
 
     /**
@@ -128,7 +160,21 @@ public record ResolvedPipeline(
      * what. If replaying transform failures against a Salesforce sink is wanted, this is the rule
      * to revisit.
      */
-    private static AuditPolicy auditPolicyFor(AuditPolicy declared, ConnectorInstance sink) {
+    private static AuditPolicy auditPolicyFor(AuditPolicy declared, ConnectorInstance sink,
+                                              boolean dryRun) {
+        // A rehearsal must never write to the record index, and the reason is the index's whole
+        // purpose. It answers one question — was this record transferred? — and a dry run's entries
+        // would answer it wrongly for every record it touched, indefinitely, in the store somebody
+        // consults precisely when they are unsure. "Would have been transferred" and "was
+        // transferred" are one word apart and worlds apart, and nobody reading a search result
+        // months later will think to ask which kind of run put it there.
+        //
+        // The dead-letter queue is untouched: a record a script threw on is a fact about the record
+        // and the script, true whether or not anything was delivered, and it is the main thing a
+        // rehearsal is run to find.
+        if (dryRun) {
+            return declared.indexing(RecordAuditLevel.ERRORS, false);
+        }
         if (!SINKS_WITHOUT_RECORD_LEVEL_REJECTIONS.contains(sink.connectorType())) {
             return declared;
         }

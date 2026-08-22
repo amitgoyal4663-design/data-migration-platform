@@ -119,7 +119,8 @@ public class RunController {
             @RequestBody(required = false) RunDtos.StartRequest request) {
 
         Run run = orchestrator.start(PipelineId.parse(pipelineId), RunTrigger.API, idempotencyKey,
-                request == null ? com.dmp.common.json.Json.emptyObject() : request.parameters());
+                request == null ? com.dmp.common.json.Json.emptyObject() : request.parameters(),
+                request != null && request.dryRun());
         return RunDtos.Response.from(run, clock.instant());
     }
 
@@ -262,6 +263,10 @@ public class RunController {
         row(csv, "verdict", "Run", report.runId(), "", "");
         row(csv, "verdict", "Pipeline", report.pipelineName(), "", "");
         row(csv, "verdict", "Generated", report.generatedAt().toString(), "", "");
+        if (report.dryRun()) {
+            row(csv, "verdict", "Dry run", "true", "",
+                    "Nothing was written. These are the records that would have been sent");
+        }
         for (RunDtos.ReconciliationLine line : report.sheet()) {
             row(csv, "sheet", line.label(), String.valueOf(line.count()), line.kind(), line.note());
         }

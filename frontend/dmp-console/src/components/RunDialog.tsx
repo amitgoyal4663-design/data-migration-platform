@@ -23,12 +23,16 @@ export function RunDialog({
   open,
   names,
   pending,
+  dryRun,
   onCancel,
   onStart,
 }: {
   open: boolean
   names: string[]
   pending: boolean
+  /** Rehearsing rather than delivering. Said in the dialog, because the button that opened it
+   *  and the button that confirms it are on different screens by the time somebody reads them. */
+  dryRun?: boolean
   onCancel: () => void
   onStart: (parameters: Record<string, string>) => void
 }) {
@@ -40,7 +44,7 @@ export function RunDialog({
 
   return (
     <Dialog open={open} onClose={onCancel} maxWidth="sm" fullWidth>
-      <DialogTitle>Start run</DialogTitle>
+      <DialogTitle>{dryRun ? 'Start dry run' : 'Start run'}</DialogTitle>
       <DialogContent>
         <Typography variant="body2" sx={{ color: muted, mb: 2.5 }}>
           This pipeline&apos;s query expects {names.length === 1 ? 'a value' : 'values'} for{' '}
@@ -51,6 +55,14 @@ export function RunDialog({
           so it stays a record of exactly which range was covered, and a retry repeats that same
           range rather than a newly computed one.
         </Typography>
+
+        {dryRun && (
+          <Typography variant="body2" sx={{ color: 'warning.main', mb: 2.5 }}>
+            Nothing will be written. The source is read in full and every script runs, but the
+            destination is never opened — so this cannot tell you it would have accepted the
+            records, only what would have been sent and which never got that far.
+          </Typography>
+        )}
 
         <Stack spacing={2}>
           {names.map((name) => (
@@ -78,7 +90,7 @@ export function RunDialog({
           disabled={incomplete || pending}
           onClick={() => onStart(values)}
         >
-          Start run
+          {dryRun ? 'Start dry run' : 'Start run'}
         </Button>
       </DialogActions>
     </Dialog>

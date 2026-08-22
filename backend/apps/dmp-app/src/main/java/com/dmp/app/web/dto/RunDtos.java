@@ -35,7 +35,12 @@ public final class RunDtos {
             @Schema(description = "Values bound into the source's query, e.g. "
                     + "{\"from\": 5000} or {\"from\": \"2026-08-01T00:00:00Z\", "
                     + "\"to\": \"2026-08-02T00:00:00Z\"}")
-            JsonNode parameters) {
+            JsonNode parameters,
+            @Schema(description = "Read and transform everything, write nothing. The destination "
+                    + "is never opened, so nothing is created and no quota is spent — which also "
+                    + "means a dry run cannot tell you the destination would have accepted the "
+                    + "records, only what would have been sent and which never got that far.")
+            boolean dryRun) {
 
         public StartRequest {
             parameters = com.dmp.common.json.Json.orEmpty(parameters);
@@ -75,6 +80,10 @@ public final class RunDtos {
                     + "a from and a to. Recorded so the run says which range it actually covered, "
                     + "and so a retry repeats that range rather than a freshly computed one.")
             JsonNode parameters,
+            @Schema(description = "True when this run rehearsed rather than delivered. Its record "
+                    + "index entries are deliberately absent, because \"would have been "
+                    + "transferred\" must never be searchable as \"was transferred\".")
+            boolean dryRun,
             String errorCode,
             String errorMessage,
             String triggeredBy,
@@ -111,8 +120,8 @@ public final class RunDtos {
         public Response carrying(List<Response> chain) {
             return new Response(id, pipelineId, pipelineVersionId, versionNumber, mode, trigger,
                     retryOf, chain, state, active, terminal, waitingOnExternalSystem, metrics,
-                    progress, durationSeconds, parameters, errorCode, errorMessage, triggeredBy,
-                    createdAt, startedAt, endedAt);
+                    progress, durationSeconds, parameters, dryRun, errorCode, errorMessage,
+                    triggeredBy, createdAt, startedAt, endedAt);
         }
 
         public static Response from(Run run, Instant now) {
@@ -134,6 +143,7 @@ public final class RunDtos {
                     metrics.progress().isPresent() ? metrics.progress().getAsDouble() : null,
                     run.duration(now).map(java.time.Duration::toSeconds).orElse(null),
                     run.parameters(),
+                    run.dryRun(),
                     run.errorCode(),
                     run.errorMessage(),
                     run.triggeredBy(),
@@ -252,6 +262,10 @@ public final class RunDtos {
             @Schema(description = "The run this reconciles, for a report saved away from the tool")
             String runId,
             String pipelineName,
+            @Schema(description = "True when these numbers describe a rehearsal. Carried on the "
+                    + "report rather than only on the run, because the report is downloaded and "
+                    + "read away from the screen that would otherwise have said so.")
+            boolean dryRun,
             Instant generatedAt) {
 
         public static ReconciliationResponse from(com.dmp.domain.run.Reconciliation source,
@@ -266,6 +280,7 @@ public final class RunDtos {
                     source.complete(),
                     run.id().toString(),
                     pipelineName,
+                    run.dryRun(),
                     now);
         }
     }

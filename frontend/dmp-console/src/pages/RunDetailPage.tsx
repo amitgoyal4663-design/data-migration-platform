@@ -295,6 +295,20 @@ export function RunDetailPage() {
         }
       />
 
+      {/*
+        * First, above everything including a failure. Every number on this page describes work
+        * that was rehearsed and not delivered, and somebody reading "10,000 written" without this
+        * line has been told something untrue.
+        */}
+      {current.dryRun && (
+        <Alert severity="warning" sx={{ mb: 3 }}>
+          <AlertTitle>Dry run — nothing was written</AlertTitle>
+          The source was read in full and every script ran, but the destination was never opened.
+          The counts below are what <em>would</em> have been sent. Records are deliberately absent
+          from the record index, so searching for one of them will not find it here.
+        </Alert>
+      )}
+
       {current.state === 'FAILED' && (
         <Alert severity="error" sx={{ mb: 3 }}>
           <AlertTitle>{current.errorCode ?? 'Run failed'}</AlertTitle>

@@ -169,7 +169,12 @@ public class ChunkExecutor {
         // reading end changes: the transforms, the sink and everything between are the pipeline's
         // own, which is the entire point — records go back through the path that rejected them.
         boolean replaying = Replay.isReplay(split.spec());
-        Sink sink = connectors.sink(pipeline.sinkInstance().connectorType());
+        Sink realSink = connectors.sink(pipeline.sinkInstance().connectorType());
+        // Substituted here, at the one place the sink is resolved, so nothing downstream needs to
+        // know a rehearsal is different from a delivery — the batching, the delivery groups, the
+        // retries and the stage log are the real ones, which is what makes the rehearsal worth
+        // anything.
+        Sink sink = pipeline.dryRun() ? new DryRunSink(realSink.spec()) : realSink;
 
         long read = 0;
         long produced = 0;

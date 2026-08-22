@@ -41,10 +41,17 @@ export function ReconciliationPanel({ runId, live }: { runId: string; live: bool
 
   return (
     <Stack spacing={2}>
+      {data.dryRun && (
+        <Alert severity="warning">
+          <AlertTitle>These are rehearsal numbers</AlertTitle>
+          Nothing was written. “Written” below means handed to a destination that was never opened,
+          so it counts what would have been sent — not what was accepted.
+        </Alert>
+      )}
       <Verdict data={data} runId={runId} />
       <Sheet data={data} />
       {data.checks.length > 0 && <Checks data={data} />}
-      {!data.indexed && (
+      {!data.indexed && !data.dryRun && (
         <Typography variant="caption" sx={{ color: muted }}>
           This pipeline does not index records, so the sheet is checked only against itself. Set
           the audit level to INDEXED to have every record counted a second time, independently.

@@ -44,6 +44,7 @@ import {
   useVersions,
 } from '@/api/hooks'
 import { PageHeader } from '@/components/PageHeader'
+import ScienceIcon from '@mui/icons-material/ScienceOutlined'
 import { RunDialog } from '@/components/RunDialog'
 import { ErrorPanel, Loading } from '@/components/Feedback'
 import RestartAltIcon from '@mui/icons-material/RestartAltOutlined'
@@ -93,6 +94,8 @@ export function PipelineDetailPage() {
   const deleteVersion = useDeleteVersion(pipelineId)
   const publish = usePublishVersion(pipelineId)
   const startRun = useStartRun()
+  // Which button opened the dialog, so the dialog can say so and the start can honour it.
+  const [dryRun, setDryRun] = useState(false)
   const copyVersion = useCopyVersion(pipelineId)
   const runParameters = useRunParameterNames(pipelineId)
   const [askingParameters, setAskingParameters] = useState(false)
@@ -179,6 +182,28 @@ export function PipelineDetailPage() {
             <Button startIcon={<AddIcon />} onClick={newVersion} disabled={createVersion.isPending}>
               {latestDraft ? `Edit draft v${latestDraft.versionNumber}` : 'New version'}
             </Button>
+            {/*
+              * A button of its own rather than a checkbox inside the run dialog, because a
+              * pipeline that takes no parameters never opens that dialog — the checkbox would have
+              * been unreachable for exactly the pipelines people rehearse most.
+              */}
+            <Button
+              startIcon={<ScienceIcon />}
+              disabled={!current.runnable || startRun.isPending}
+              onClick={() => {
+                if ((runParameters.data?.names.length ?? 0) > 0) {
+                  setDryRun(true)
+                  setAskingParameters(true)
+                  return
+                }
+                startRun.mutate(
+                  { pipelineId, dryRun: true },
+                  { onSuccess: (run) => navigate(`/runs/${run.id}`) },
+                )
+              }}
+            >
+              Dry run
+            </Button>
             <Button
               startIcon={<PlayArrowIcon />}
               variant="contained"
@@ -187,6 +212,7 @@ export function PipelineDetailPage() {
                 // A pipeline whose query takes no parameters starts immediately, as it always
                 // has. Only one that needs values stops to ask for them.
                 if ((runParameters.data?.names.length ?? 0) > 0) {
+                  setDryRun(false)
                   setAskingParameters(true)
                   return
                 }
@@ -206,10 +232,11 @@ export function PipelineDetailPage() {
         open={askingParameters}
         names={runParameters.data?.names ?? []}
         pending={startRun.isPending}
+        dryRun={dryRun}
         onCancel={() => setAskingParameters(false)}
         onStart={(parameters) =>
           startRun.mutate(
-            { pipelineId, parameters },
+            { pipelineId, parameters, dryRun },
             {
               onSuccess: (run) => {
                 setAskingParameters(false)

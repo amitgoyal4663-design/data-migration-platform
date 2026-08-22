@@ -87,6 +87,16 @@ public class RunDocument {
     @Field("parameters")
     private Map<String, Object> parameters;
 
+    /**
+     * Boxed, so a run stored before dry runs existed reads back as null rather than as false.
+     *
+     * <p>Both mean the same thing here and the mapper treats them alike — but a primitive would
+     * have made the two indistinguishable, and this is a field whose wrong value means a rehearsal
+     * writes to production.
+     */
+    @Field("dryRun")
+    private Boolean dryRun;
+
     @Field("errorCode")
     private String errorCode;
 
@@ -217,6 +227,14 @@ public class RunDocument {
 
     public Map<String, Object> getParameters() {
         return parameters;
+    }
+
+    public Boolean getDryRun() {
+        return dryRun;
+    }
+
+    public void setDryRun(Boolean dryRun) {
+        this.dryRun = dryRun;
     }
 
     public void setParameters(Map<String, Object> parameters) {

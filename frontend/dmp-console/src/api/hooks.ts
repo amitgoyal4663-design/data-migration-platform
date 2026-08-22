@@ -517,13 +517,20 @@ export function useStartRun() {
     mutationFn: ({
       pipelineId,
       parameters,
+      dryRun,
     }: {
       pipelineId: string
       parameters?: Record<string, string>
+      /** Read and transform everything, write nothing. The destination is never opened. */
+      dryRun?: boolean
     }) =>
       api.post<Run>(
         `/api/v1/pipelines/${pipelineId}/runs`,
-        parameters && Object.keys(parameters).length > 0 ? { parameters } : undefined,
+        // Sent only when there is something to say, so an ordinary run posts exactly the body it
+        // always did and a deployment running an older server is unaffected by this field.
+        (parameters && Object.keys(parameters).length > 0) || dryRun
+          ? { ...(parameters ? { parameters } : {}), ...(dryRun ? { dryRun: true } : {}) }
+          : undefined,
         {
           // Makes a double-click harmless: the second request returns the run the first created
           // rather than starting a second migration.

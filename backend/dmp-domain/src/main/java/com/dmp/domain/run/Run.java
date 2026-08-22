@@ -73,6 +73,24 @@ public record Run(
          * a person typing them, a schedule computing them — to the connector that binds them.
          */
         JsonNode parameters,
+        /**
+         * Read and transform everything; write nothing.
+         *
+         * <p>What you run the day before the real one. The source is read in full, every script
+         * runs against every record, and the counts and rejections that come out are the ones the
+         * real run would produce — but no destination is opened, so nothing is created, no bulk job
+         * is submitted and no quota is spent.
+         *
+         * <p>On the run rather than on the pipeline version, and that is the whole point: the
+         * rehearsal and the real thing must execute the <em>same</em> published version. A flag on
+         * the version would mean publishing a second version to do the real run, and then what was
+         * rehearsed is not what runs.
+         *
+         * <p>Fixed for the life of the run. A retry of a dry run is a dry run; there is no way to
+         * turn a rehearsal into a delivery halfway through, which is the kind of thing that would
+         * otherwise be discovered afterwards.
+         */
+        boolean dryRun,
         String errorCode,
         String errorMessage,
         String triggeredBy,
@@ -132,9 +150,18 @@ public record Run(
                              int versionNumber, PipelineMode mode, RunTrigger trigger,
                              String idempotencyKey, String triggeredBy, RunId retryOf,
                              JsonNode parameters, Instant now) {
+        return create(tenantId, pipelineId, versionId, versionNumber, mode, trigger,
+                idempotencyKey, triggeredBy, retryOf, parameters, false, now);
+    }
+
+    /** Creates a run that reads and transforms but writes nothing. See {@link #dryRun()}. */
+    public static Run create(TenantId tenantId, PipelineId pipelineId, PipelineVersionId versionId,
+                             int versionNumber, PipelineMode mode, RunTrigger trigger,
+                             String idempotencyKey, String triggeredBy, RunId retryOf,
+                             JsonNode parameters, boolean dryRun, Instant now) {
         return new Run(RunId.newId(), tenantId, pipelineId, versionId, versionNumber, mode, trigger, retryOf,
                 RunState.CREATED, idempotencyKey, RunMetrics.ZERO, 0, Json.emptyObject(), parameters,
-                null, null, triggeredBy, now, null, null, now, 0L);
+                dryRun, null, null, triggeredBy, now, null, null, now, 0L);
     }
 
     public Run markValidated(Instant now) {
@@ -157,7 +184,7 @@ public record Run(
         ObjectNode merged = preparationState.deepCopy();
         merged.set(nodeId, handle == null ? Json.emptyObject() : handle);
         return new Run(id, tenantId, pipelineId, pipelineVersionId, versionNumber, mode, trigger, retryOf,
-                RunState.PREPARING, idempotencyKey, metrics, activeSlots, merged, parameters, errorCode, errorMessage,
+                RunState.PREPARING, idempotencyKey, metrics, activeSlots, merged, parameters, dryRun, errorCode, errorMessage,
                 triggeredBy, createdAt, startedAt, endedAt, now, rowVersion);
     }
 
@@ -166,7 +193,7 @@ public record Run(
         ObjectNode remaining = preparationState.deepCopy();
         remaining.remove(nodeId);
         return new Run(id, tenantId, pipelineId, pipelineVersionId, versionNumber, mode, trigger, retryOf,
-                state, idempotencyKey, metrics, activeSlots, remaining, parameters, errorCode, errorMessage,
+                state, idempotencyKey, metrics, activeSlots, remaining, parameters, dryRun, errorCode, errorMessage,
                 triggeredBy, createdAt, startedAt, endedAt, now, rowVersion);
     }
 
@@ -178,7 +205,7 @@ public record Run(
     public Run start(Instant now) {
         state.requireTransitionTo(RunState.RUNNING);
         return new Run(id, tenantId, pipelineId, pipelineVersionId, versionNumber, mode, trigger, retryOf,
-                RunState.RUNNING, idempotencyKey, metrics, activeSlots, preparationState, parameters, null, null, triggeredBy,
+                RunState.RUNNING, idempotencyKey, metrics, activeSlots, preparationState, parameters, dryRun, null, null, triggeredBy,
                 createdAt, startedAt == null ? now : startedAt, null, now, rowVersion);
     }
 
@@ -229,21 +256,21 @@ public record Run(
 
     public Run withMetrics(RunMetrics newMetrics) {
         return new Run(id, tenantId, pipelineId, pipelineVersionId, versionNumber, mode, trigger, retryOf,
-                state, idempotencyKey, newMetrics, activeSlots, preparationState, parameters, errorCode, errorMessage,
+                state, idempotencyKey, newMetrics, activeSlots, preparationState, parameters, dryRun, errorCode, errorMessage,
                 triggeredBy, createdAt, startedAt, endedAt, updatedAt, rowVersion);
     }
 
     private Run transition(RunState target, Instant now) {
         state.requireTransitionTo(target);
         return new Run(id, tenantId, pipelineId, pipelineVersionId, versionNumber, mode, trigger, retryOf,
-                target, idempotencyKey, metrics, activeSlots, preparationState, parameters, errorCode, errorMessage,
+                target, idempotencyKey, metrics, activeSlots, preparationState, parameters, dryRun, errorCode, errorMessage,
                 triggeredBy, createdAt, startedAt, endedAt, now, rowVersion);
     }
 
     private Run terminate(RunState target, String code, String message, Instant now) {
         state.requireTransitionTo(target);
         return new Run(id, tenantId, pipelineId, pipelineVersionId, versionNumber, mode, trigger, retryOf,
-                target, idempotencyKey, metrics, activeSlots, preparationState, parameters, code, message, triggeredBy,
+                target, idempotencyKey, metrics, activeSlots, preparationState, parameters, dryRun, code, message, triggeredBy,
                 createdAt, startedAt, now, now, rowVersion);
     }
 
