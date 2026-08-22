@@ -230,6 +230,12 @@ services:
         condition: service_healthy
       opensearch:
         condition: service_healthy
+      redis:
+        condition: service_started
+      # Topics must exist before anything reads or writes them, and this platform will
+      # not create them — see kafka-init.
+      kafka-init:
+        condition: service_completed_successfully
     ports:
       - "8080:8080"
     environment:
@@ -239,15 +245,115 @@ services:
       DMP_POSTGRES_PASSWORD: dmp
       DMP_MONGO_URI: mongodb://mongo:27017/dmp?replicaSet=rs0
       DMP_RECORDINDEX_ENABLED: "true"
+      # Both halves of the search story, and they are separate switches: the record
+      # index answers "what happened to this record", the stage log answers "what did
+      # the platform do". A stack shipped with the first and not the second has a
+      # timeline that is permanently empty and says so in a way nobody believes.
+      DMP_RECORDLOG_OPENSEARCH_ENABLED: "true"
       DMP_RECORDLOG_OPENSEARCH_URL: http://opensearch:9200
-      DMP_LOG_LEVEL: INFO
+      DMP_REDIS_HOST: redis
+      DMP_REDIS_PORT: "6379"
+      DMP_EVENTS_KAFKA_ENABLED: "true"
+      DMP_KAFKA_BOOTSTRAP: kafka:19092
+      # DEBUG by default in this stack, because the whole point of shipping logs to OpenSearch is
+      # being able to reconstruct a chunk — and at INFO a chunk produces one line. In production
+      # this belongs at INFO with DEBUG turned on for the run being investigated.
+      DMP_LOG_LEVEL: ${DMP_LOG_LEVEL:-DEBUG}
+      # A JSON copy of every line, on a volume the shipper reads. The console stays human-readable.
+      DMP_LOG_FILE: /app/logs/dmp-app.json
       # Resolved by connector instances that reference env:DEMO_PG_USER — references,
       # never values, are what the definition store holds.
       DEMO_PG_USER: dmp
       DEMO_PG_PASSWORD: dmp
+      # Same rule for real credentials: the definition store holds env:DBX_TOKEN, and
+      # the value arrives here. Empty by default so the stack starts without anyone
+      # holding a Salesforce org — the connectors that need them fail their own
+      # connection test with a message naming the field, and nothing else is affected.
+      DBX_TOKEN: ${DBX_TOKEN:-local-mock-token}
+      SF_CLIENT_ID: ${SF_CLIENT_ID:-}
+      SF_CLIENT_SECRET: ${SF_CLIENT_SECRET:-}
     volumes:
       # Third-party connector jars. One subdirectory per connector.
       - ./plugins:/app/plugins:ro
+      - app-logs:/app/logs
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Kafka topics, created before the app starts.
+  #
+  # The platform deliberately cannot create a topic: in the environments this runs
+  # in, topics are provisioned by another team on request, and a job whose topic is
+  # missing must stop and say so rather than quietly conjuring one. This service is
+  # that other team, for a laptop. Broker-side auto-creation stays off.
+  # ---------------------------------------------------------------------------
+  kafka-init:
+    image: apache/kafka:3.9.0
+    container_name: dmp-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for topic in dmp.run.events.v1 orders.v1; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 \
+            --create --if-not-exists --topic "$$topic" \
+            --partitions 3 --replication-factor 1
+        done
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --list
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # A fake Databricks warehouse, and a fake customer API to push into.
+  #
+  # Here so the stack demonstrates something the moment it is up. Nothing in the
+  # platform depends on it; delete the service and the platform is unchanged.
+  # ---------------------------------------------------------------------------
+  databricks-mock:
+    build:
+      context: ../../mocks/databricks
+      dockerfile: Dockerfile
+    container_name: dmp-databricks-mock
+    profiles: ["full"]
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      MOCK_MONGO_URI: mongodb://mongo:27017/?replicaSet=rs0
+      # Polls a statement stays PENDING before succeeding. Raise it to watch the platform
+      # wait on a slow warehouse without holding a worker.
+      MOCK_PENDING_POLLS: ${MOCK_PENDING_POLLS:-1}
+      # Result chunks that refuse before they work, as "index x times" — "3x2,7x99" fails chunk 3
+      # twice then serves it, and fails chunk 7 more often than any pipeline will retry.
+      MOCK_FAIL_CHUNKS: ${MOCK_FAIL_CHUNKS:-}
+      # The same idea for the one-statement-per-chunk mode, keyed by the query's OFFSET, which is
+      # the only thing identifying a chunk when every chunk has its own statement.
+      MOCK_SLOW_OFFSETS: ${MOCK_SLOW_OFFSETS:-}
+      MOCK_FAIL_OFFSETS: ${MOCK_FAIL_OFFSETS:-}
+    ports:
+      - "8099:8099"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Ships the application's own logs into OpenSearch.
+  #
+  # The third of three stores, and the least structured: the record index says what happened to
+  # each record, the stage log says what the platform did, and this says what it had to say about
+  # it — a stack trace, a connector's aside, a warning nobody modelled in advance.
+  # ---------------------------------------------------------------------------
+  log-shipper:
+    image: fluent/fluent-bit:3.1.9
+    container_name: dmp-log-shipper
+    profiles: ["full"]
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    volumes:
+      - app-logs:/app/logs:ro
+      - ../docker/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ../docker/fluent-bit-parsers.conf:/fluent-bit/etc/parsers.conf:ro
+      - shipper-state:/var/log
     restart: unless-stopped
 
   console:
@@ -263,6 +369,8 @@ services:
     restart: unless-stopped
 
 volumes:
+  app-logs:
+  shipper-state:
   opensearch-data:
   postgres-data:
   mongo-data:

@@ -25,13 +25,21 @@ up: ## Start infrastructure only (run the app yourself from an IDE)
 	@echo "  Kafka     localhost:9092"
 	@echo "  Redis     localhost:6379"
 
-stack: ## Start EVERYTHING, including the app and the console
-	$(COMPOSE) --profile full up -d --build
+stack: ## Start EVERYTHING, including the app and the console. Only needs Docker.
+	# mongo-init before the rest: the replica set has to elect a primary before anything
+	# connects to it, and a service that starts first simply fails and restarts in a loop.
+	$(COMPOSE) up -d mongo
 	@$(COMPOSE) up mongo-init
+	$(COMPOSE) --profile full up -d --build
 	@echo ""
-	@echo "  Console   http://localhost:3000"
-	@echo "  API docs  http://localhost:8080/swagger-ui.html"
-	@echo "  Health    http://localhost:8080/actuator/health"
+	@echo "  Console        http://localhost:3000"
+	@echo "  API docs       http://localhost:8080/swagger-ui.html"
+	@echo "  Health         http://localhost:8080/actuator/health"
+	@echo "  Search/logs    http://localhost:5601"
+	@echo "  Mock warehouse http://localhost:8099"
+	@echo ""
+	@echo "  The API waits for Postgres, Mongo, OpenSearch and the Kafka topics."
+	@echo "  'make ps' shows dmp-app as healthy when it is genuinely ready."
 
 down: ## Stop everything, keeping data
 	$(COMPOSE) --profile full down

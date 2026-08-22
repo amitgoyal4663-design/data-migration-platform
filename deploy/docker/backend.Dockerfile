@@ -13,19 +13,34 @@ WORKDIR /build
 
 # POMs first, so the dependency layer is cached and only re-resolves when a POM
 # actually changes. Without this every source edit re-downloads the world.
-COPY backend/pom.xml                                  ./pom.xml
-COPY backend/dmp-bom/pom.xml                          ./dmp-bom/pom.xml
-COPY backend/dmp-common/pom.xml                       ./dmp-common/pom.xml
-COPY backend/dmp-domain/pom.xml                       ./dmp-domain/pom.xml
-COPY backend/dmp-application/pom.xml                  ./dmp-application/pom.xml
-COPY backend/dmp-persistence-postgres/pom.xml         ./dmp-persistence-postgres/pom.xml
-COPY backend/dmp-persistence-mongo/pom.xml            ./dmp-persistence-mongo/pom.xml
-COPY backend/dmp-connector-api/pom.xml                ./dmp-connector-api/pom.xml
-COPY backend/dmp-connector-runtime/pom.xml            ./dmp-connector-runtime/pom.xml
-COPY backend/connectors/dmp-connector-jdbc/pom.xml    ./connectors/dmp-connector-jdbc/pom.xml
-COPY backend/dmp-engine/pom.xml                       ./dmp-engine/pom.xml
-COPY backend/apps/dmp-app/pom.xml                     ./apps/dmp-app/pom.xml
+COPY backend/pom.xml                                   ./pom.xml
+COPY backend/dmp-bom/pom.xml                           ./dmp-bom/pom.xml
+COPY backend/dmp-common/pom.xml                        ./dmp-common/pom.xml
+COPY backend/dmp-domain/pom.xml                        ./dmp-domain/pom.xml
+COPY backend/dmp-application/pom.xml                   ./dmp-application/pom.xml
+COPY backend/dmp-persistence-postgres/pom.xml          ./dmp-persistence-postgres/pom.xml
+COPY backend/dmp-persistence-mongo/pom.xml             ./dmp-persistence-mongo/pom.xml
+COPY backend/dmp-connector-api/pom.xml                 ./dmp-connector-api/pom.xml
+COPY backend/dmp-connector-runtime/pom.xml             ./dmp-connector-runtime/pom.xml
+COPY backend/dmp-transform-api/pom.xml                 ./dmp-transform-api/pom.xml
+COPY backend/dmp-transform-graaljs/pom.xml             ./dmp-transform-graaljs/pom.xml
+COPY backend/dmp-recordlog-opensearch/pom.xml          ./dmp-recordlog-opensearch/pom.xml
+COPY backend/dmp-ratelimit-redis/pom.xml               ./dmp-ratelimit-redis/pom.xml
+COPY backend/dmp-events-kafka/pom.xml                  ./dmp-events-kafka/pom.xml
+COPY backend/dmp-engine/pom.xml                        ./dmp-engine/pom.xml
+COPY backend/connectors/dmp-connector-jdbc/pom.xml     ./connectors/dmp-connector-jdbc/pom.xml
+COPY backend/connectors/dmp-connector-file/pom.xml     ./connectors/dmp-connector-file/pom.xml
+COPY backend/connectors/dmp-connector-rest/pom.xml     ./connectors/dmp-connector-rest/pom.xml
+COPY backend/connectors/dmp-connector-mongodb/pom.xml  ./connectors/dmp-connector-mongodb/pom.xml
+COPY backend/connectors/dmp-connector-kafka/pom.xml    ./connectors/dmp-connector-kafka/pom.xml
+COPY backend/connectors/dmp-connector-salesforce/pom.xml ./connectors/dmp-connector-salesforce/pom.xml
+COPY backend/connectors/dmp-connector-databricks/pom.xml ./connectors/dmp-connector-databricks/pom.xml
+COPY backend/apps/dmp-app/pom.xml                      ./apps/dmp-app/pom.xml
 
+# Warm-up only, never a gate: a module added without being listed above should cost a
+# slower build, not a failed one. The list was stale and silently useless for months —
+# every module missing from it meant the whole dependency tree was re-resolved on any
+# source edit, which is the cache this stage exists to fill.
 RUN mvn -B -q dependency:go-offline -DskipTests || true
 
 COPY backend/ ./
@@ -47,7 +62,10 @@ COPY --from=build /build/apps/dmp-app/target/dmp-app-*.jar ./dmp-app.jar
 
 # Where third-party connector jars are mounted. Each subdirectory is loaded by its
 # own child-first classloader, so their dependencies cannot collide (ADR-0006).
-RUN mkdir -p /app/plugins && chown -R dmp:dmp /app
+# Both created before the user switch so a named volume mounted over /app/logs inherits this
+# ownership. Without it the volume arrives root-owned and the application — which is deliberately
+# not root — cannot write its own log.
+RUN mkdir -p /app/plugins /app/logs && chown -R dmp:dmp /app
 
 USER dmp
 
