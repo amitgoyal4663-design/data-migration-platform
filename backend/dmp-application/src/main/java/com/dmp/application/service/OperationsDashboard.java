@@ -87,20 +87,87 @@ public class OperationsDashboard {
     private static final Duration PAUSED_TOO_LONG = Duration.ofHours(24);
     private static final Duration STUCK_AFTER = Duration.ofHours(4);
 
+    /**
+     * Failure reasons brought up from the run to the dashboard.
+     *
+     * <p>Three, because the question at 9am is "what broke", and by the fourth distinct reason the
+     * answer is "open the run" anyway. The exact counts are already exact; this is triage.
+     */
+    private static final int TOP_FAILURES = 3;
+
+    /** Enough history to see a trend at a glance without the row becoming a chart. */
+    private static final int HISTORY = 7;
+
     private final PipelineRepository pipelines;
     private final RunRepository runs;
     private final ScheduleRepository schedules;
+    private final com.dmp.application.port.out.RecordErrorPort recordErrors;
     private final TenantContext tenantContext;
     private final Clock clock;
 
     public OperationsDashboard(PipelineRepository pipelines, RunRepository runs,
-                               ScheduleRepository schedules, TenantContext tenantContext,
-                               Clock clock) {
+                               ScheduleRepository schedules,
+                               com.dmp.application.port.out.RecordErrorPort recordErrors,
+                               TenantContext tenantContext, Clock clock) {
         this.pipelines = pipelines;
         this.runs = runs;
         this.schedules = schedules;
+        this.recordErrors = recordErrors;
         this.tenantContext = tenantContext;
         this.clock = clock;
+    }
+
+    /**
+     * The whole screen in one call: the watchlist, what is in flight, and the day's totals.
+     *
+     * <p>One call because the three are read together and must agree. Fetched separately they can
+     * disagree by a run — totals counting something the live list has already dropped — and a
+     * screen that contradicts itself is one nobody trusts twice.
+     */
+    public Dashboard dashboard(Duration window) {
+        TenantId tenantId = tenantContext.currentTenant();
+        Instant now = clock.instant();
+        Instant since = now.minus(window);
+
+        List<PipelineHealth> health = today(window);
+
+        // Running means running. findActive also returns PAUSED, because a paused run still holds
+        // its slot — true for concurrency and wrong under a heading that says these are happening.
+        List<Live> live = runs.findActive(tenantId).stream()
+                .filter(run -> !run.dryRun())
+                .filter(run -> run.state() != RunState.PAUSED)
+                .map(run -> new Live(
+                        run.id().toString(),
+                        pipelineName(tenantId, run.pipelineId()),
+                        run.state().name(),
+                        run.metrics().progress().isPresent()
+                                ? run.metrics().progress().getAsDouble() : null,
+                        run.metrics().recordsRead(),
+                        run.metrics().recordsWritten(),
+                        // From creation, not from the start. A run stuck in PREPARING has no start
+                        // time, and measuring from one reported "0m" for something that had been
+                        // going nowhere for two days.
+                        Duration.between(run.startedAt() == null
+                                ? run.createdAt() : run.startedAt(), now).toSeconds()))
+                .sorted(Comparator.comparing(Live::pipeline))
+                .toList();
+
+        List<Run> recent = runs.search(tenantId,
+                        new RunRepository.RunSearch(null, Set.of(), since, null, null),
+                        new PageQuery(0, 200, "createdAt", false))
+                .content().stream()
+                .filter(run -> !run.dryRun())
+                .toList();
+
+        Totals totals = new Totals(
+                recent.stream().filter(r -> r.state() == RunState.COMPLETED).count(),
+                recent.stream().filter(r -> r.state() == RunState.FAILED).count(),
+                recent.stream().mapToLong(r -> r.metrics().recordsRead()).sum(),
+                recent.stream().mapToLong(r -> r.metrics().recordsWritten()).sum(),
+                recent.stream().mapToLong(r -> r.metrics().recordsFailed()).sum(),
+                live.size());
+
+        return new Dashboard(health, live, totals, now);
     }
 
     /** Every watched pipeline, with its last run judged against its own history. */
@@ -168,8 +235,35 @@ public class OperationsDashboard {
             findings.addAll(runFindings(latest, typicalRows, typicalSeconds, since));
         }
 
+        // The reasons, not just the count. A support desk seeing "222 failed" has to open the run
+        // to learn anything; seeing "180 Policy_Number__c is required" already knows whether this
+        // is theirs to fix or somebody else's.
+        List<FailureReason> reasons = List.of();
+        if (latest != null && latest.metrics().recordsFailed() > 0) {
+            try {
+                reasons = recordErrors.summariseByRun(tenantId, latest.id(), TOP_FAILURES).stream()
+                        .map(group -> new FailureReason(group.count(), group.code(),
+                                readable(group.message())))
+                        .toList();
+            } catch (RuntimeException e) {
+                // The dead-letter store being unavailable must not blank the whole screen. Every
+                // other number here comes from somewhere else and is still true.
+                reasons = List.of();
+            }
+        }
+
+        List<Attempt> trend = recent.stream()
+                .filter(run -> !run.dryRun())
+                .limit(HISTORY)
+                .map(run -> new Attempt(run.id().toString(), run.state().name(),
+                        run.createdAt(), run.metrics().recordsRead(),
+                        run.metrics().recordsWritten(), run.metrics().recordsFailed(),
+                        run.duration(now()).map(Duration::toSeconds).orElse(0L)))
+                .toList();
+
         return new PipelineHealth(pipeline.id().toString(), pipeline.name(), latest, typicalRows,
-                typicalSeconds, history.size(), List.copyOf(findings));
+                typicalSeconds, history.size(), List.copyOf(findings), reasons, trend,
+                scheduleSummary(tenantId, pipeline));
     }
 
     /**
@@ -319,161 +413,65 @@ public class OperationsDashboard {
         return hours < 48 ? hours + "h" : (hours / 24) + "d";
     }
 
-    /**
-     * Everything a wall display shows, in one call.
-     *
-     * <p>One call because a screen on a wall is refreshed on a timer forever, and four calls that
-     * can each fail separately produce a board showing three quarters of the truth with nothing to
-     * say the last quarter is missing. A board that is wrong without admitting it is worse than a
-     * blank one.
-     *
-     * <p>Covers every run, not only the watchlist. The watchlist exists so one person's morning
-     * screen stays small; a wall is read by whoever walks past, and a failure nobody thought to
-     * watch is exactly the one that should be up there.
-     */
-    public Board board(Duration window) {
-        TenantId tenantId = tenantContext.currentTenant();
-        Instant now = clock.instant();
-        Instant since = now.minus(window);
-
-        List<Run> active = runs.findActive(tenantId);
-
-        List<Run> recent = runs.search(tenantId,
-                        new RunRepository.RunSearch(null, Set.of(), since, null, null),
-                        new PageQuery(0, 200, "createdAt", false))
-                .content().stream()
-                .filter(run -> !run.dryRun())
-                .toList();
-
-        // "Running now" means running, not "occupies worker capacity". findActive includes PAUSED
-        // because a paused run still holds its slot — true for concurrency accounting, and wrong
-        // on a board, where it showed four runs somebody paused a fortnight ago under a heading
-        // that says they are happening.
-        List<Live> live = active.stream()
-                .filter(run -> !run.dryRun())
-                .filter(run -> run.state() != RunState.PAUSED)
-                .map(run -> new Live(
-                        run.id().toString(),
-                        pipelineName(tenantId, run.pipelineId()),
-                        run.state().name(),
-                        run.metrics().progress().isPresent()
-                                ? run.metrics().progress().getAsDouble() : null,
-                        run.metrics().recordsRead(),
-                        run.metrics().recordsWritten(),
-                        // From when the run was created, not from when it started. A run stuck in
-                        // PREPARING has no start time, so measuring from one reported "0m" for
-                        // something that had been going nowhere for an hour.
-                        Duration.between(run.startedAt() == null ? run.createdAt()
-                                : run.startedAt(), now).toSeconds()))
-                .sorted(Comparator.comparing(Live::pipeline))
-                .toList();
-
-        Today today = new Today(
-                recent.stream().filter(r -> r.state() == RunState.COMPLETED).count(),
-                recent.stream().filter(r -> r.state() == RunState.FAILED).count(),
-                recent.stream().mapToLong(r -> r.metrics().recordsRead()).sum(),
-                recent.stream().mapToLong(r -> r.metrics().recordsWritten()).sum(),
-                recent.stream().mapToLong(r -> r.metrics().recordsFailed()).sum(),
-                live.size());
-
-        List<Attention> attention = new ArrayList<>();
-
-        // Every failure in the window, whether or not anybody watches that pipeline.
-        for (Run run : recent) {
-            if (run.state() == RunState.FAILED) {
-                attention.add(new Attention(Severity.CRITICAL,
-                        pipelineName(tenantId, run.pipelineId()), run.id().toString(),
-                        "Run failed",
-                        run.errorMessage() == null ? run.errorCode() : run.errorMessage(),
-                        run.endedAt() == null ? run.createdAt() : run.endedAt()));
-            } else if (run.metrics().unaccountedRecords() != 0) {
-                // Green everywhere else, which is the whole reason it belongs on a wall.
-                attention.add(new Attention(Severity.CRITICAL,
-                        pipelineName(tenantId, run.pipelineId()), run.id().toString(),
-                        run.metrics().unaccountedRecords() + " records unaccounted for",
-                        "Reached delivery and were neither written nor reported failed",
-                        run.endedAt() == null ? run.createdAt() : run.endedAt()));
-            }
-        }
-
-        // A run nobody finished. Paused two weeks ago, or preparing for an hour against a
-        // warehouse that is never going to answer — neither produces a failure, neither appears in
-        // any window of recent activity, and both hold a concurrency slot the whole time. Nothing
-        // else in the platform reports them, which is exactly why they belong here.
-        for (Run run : active) {
-            if (run.dryRun()) {
-                continue;
-            }
-            Instant began = run.startedAt() == null ? run.createdAt() : run.startedAt();
-            Duration held = Duration.between(began, now);
-
-            if (run.state() == RunState.PAUSED && held.compareTo(PAUSED_TOO_LONG) > 0) {
-                attention.add(new Attention(Severity.WARNING,
-                        pipelineName(tenantId, run.pipelineId()), run.id().toString(),
-                        "Paused for " + humanise(held),
-                        "Still holding a slot. Resume it or stop it.", began));
-
-            } else if (run.state() != RunState.PAUSED && held.compareTo(STUCK_AFTER) > 0) {
-                attention.add(new Attention(Severity.CRITICAL,
-                        pipelineName(tenantId, run.pipelineId()), run.id().toString(),
-                        run.state().name().toLowerCase() + " for " + humanise(held),
-                        "No longer making progress, and it will not fail on its own.", began));
-            }
-        }
-
-        // Then the anomalies, which need a baseline and so only exist for watched pipelines.
-        for (PipelineHealth health : today(window)) {
-            for (Finding finding : health.findings()) {
-                if (finding.severity() == Severity.INFO || "FAILED".equals(finding.code())
-                        || "UNACCOUNTED".equals(finding.code())) {
-                    continue;   // Already listed above, from the run itself.
-                }
-                attention.add(new Attention(finding.severity(), health.name(),
-                        health.latest() == null ? null : health.latest().id().toString(),
-                        headlineFor(finding.code()), finding.message(), now));
-            }
-        }
-
-        attention.sort(Comparator.comparingInt((Attention a) -> a.severity().ordinal()).reversed()
-                .thenComparing(Attention::at, Comparator.reverseOrder()));
-
-        Severity verdict = attention.stream().map(Attention::severity)
-                .max(Comparator.naturalOrder()).orElse(Severity.INFO);
-
-        return new Board(verdict, live, today, List.copyOf(attention), now);
+    private Instant now() {
+        return clock.instant();
     }
 
-    /** Short enough to read across a room; the sentence underneath carries the detail. */
-    private static String headlineFor(String code) {
-        return switch (code) {
-            case "DID_NOT_RUN" -> "Scheduled run never started";
-            case "NO_ROWS" -> "Completed with no data";
-            case "VOLUME_LOW" -> "Volume down";
-            case "VOLUME_HIGH" -> "Volume up";
-            case "REJECTIONS" -> "Records not delivered";
-            case "SLOW" -> "Running slow";
-            default -> code;
-        };
+    /**
+     * The wrapper a sandbox adds, removed.
+     *
+     * <p>"Transform ? threw: Error: amount must be positive" is three layers of packaging around
+     * four useful words, and on a dashboard row there is no space for packaging.
+     */
+    private static String readable(String message) {
+        if (message == null) {
+            return "";
+        }
+        String stripped = message.replaceFirst("^Transform .*? threw:\\s*", "")
+                .replaceFirst("^(Error|TypeError|ReferenceError|RangeError):\\s*", "")
+                .trim();
+        return stripped.isEmpty() ? message : stripped;
+    }
+
+    /** When this pipeline is next expected, so "it has not run" can be read as late or as early. */
+    private ScheduleSummary scheduleSummary(TenantId tenantId, Pipeline pipeline) {
+        return schedules.findByPipeline(tenantId, pipeline.id()).stream()
+                .filter(Schedule::enabled)
+                .findFirst()
+                .map(schedule -> new ScheduleSummary(schedule.name(), schedule.cronExpression(),
+                        schedule.timezone().getId(), schedule.lastFiredAt(),
+                        nextFireAfter(schedule, now()).orElse(null)))
+                .orElse(null);
+    }
+
+    /** @param reason already stripped of the sandbox's wrapper — a dashboard row has no room for it */
+    public record FailureReason(long count, String code, String reason) {
+    }
+
+    /** One earlier run, for the trend beside today's number. */
+    public record Attempt(String runId, String state, Instant at, long read, long written,
+                          long failed, long seconds) {
+    }
+
+    public record ScheduleSummary(String name, String cron, String timezone, Instant lastFiredAt,
+                                  Instant nextDueAt) {
     }
 
     private String pipelineName(TenantId tenantId, PipelineId id) {
         return pipelines.findById(tenantId, id).map(Pipeline::name).orElse(id.toString());
     }
 
+    /** @param progress 0 to 1, or null before planning has produced a chunk count */
     public record Live(String runId, String pipeline, String state, Double progress,
                        long recordsRead, long recordsWritten, long seconds) {
     }
 
-    public record Today(long completed, long failed, long recordsRead, long recordsWritten,
-                        long recordsFailed, int running) {
+    public record Totals(long completed, long failed, long recordsRead, long recordsWritten,
+                         long recordsFailed, int running) {
     }
 
-    public record Attention(Severity severity, String pipeline, String runId, String headline,
-                            String detail, Instant at) {
-    }
-
-    public record Board(Severity verdict, List<Live> live, Today today, List<Attention> attention,
-                        Instant generatedAt) {
+    public record Dashboard(List<PipelineHealth> pipelines, List<Live> live, Totals totals,
+                            Instant generatedAt) {
     }
 
     /** How loudly a finding should be read. */
@@ -493,7 +491,9 @@ public class OperationsDashboard {
      *                     three runs and one from ten deserve different amounts of belief.
      */
     public record PipelineHealth(String pipelineId, String name, Run latest, Long typicalRows,
-                                 Long typicalSeconds, int baselineRuns, List<Finding> findings) {
+                                 Long typicalSeconds, int baselineRuns, List<Finding> findings,
+                                 List<FailureReason> reasons, List<Attempt> trend,
+                                 ScheduleSummary schedule) {
 
         public Severity worst() {
             return findings.stream().map(Finding::severity)

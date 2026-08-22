@@ -130,45 +130,6 @@ export interface ChunkSummary {
   recordsAtRisk: number
 }
 
-export interface BoardLiveRun {
-  runId: string
-  pipeline: string
-  state: string
-  /** 0 to 1; null before planning finishes. */
-  progress: number | null
-  recordsRead: number
-  recordsWritten: number
-  seconds: number
-}
-
-export interface BoardTotals {
-  completed: number
-  failed: number
-  recordsRead: number
-  recordsWritten: number
-  recordsFailed: number
-  running: number
-}
-
-export interface BoardAttention {
-  severity: FindingSeverity
-  pipeline: string
-  runId: string | null
-  headline: string
-  detail: string
-  at: string
-}
-
-/** Everything a wall display shows, in one payload — see the endpoint on why it is one call. */
-export interface StatusBoard {
-  verdict: FindingSeverity
-  live: BoardLiveRun[]
-  today: BoardTotals
-  /** Failures first, then anomalies, newest first within each. */
-  attention: BoardAttention[]
-  generatedAt: string
-}
-
 /** How loudly a dashboard finding should be read. */
 export type FindingSeverity = 'INFO' | 'WARNING' | 'CRITICAL'
 
@@ -193,6 +154,58 @@ export interface PipelineHealth {
   worst: FindingSeverity
   healthy: boolean
   findings: OperationsFinding[]
+  /** Biggest first. "180 Policy_Number__c is required" says whose problem it is; "222" does not. */
+  reasons: OperationsFailureReason[]
+  /** The last seven runs, newest first. */
+  trend: OperationsAttempt[]
+  schedule: OperationsSchedule | null
+}
+
+export interface OperationsLiveRun {
+  runId: string
+  pipeline: string
+  state: RunState
+  /** 0 to 1; null before planning finishes. */
+  progress: number | null
+  recordsRead: number
+  recordsWritten: number
+  seconds: number
+}
+
+export interface OperationsTotals {
+  completed: number
+  failed: number
+  recordsRead: number
+  recordsWritten: number
+  recordsFailed: number
+  running: number
+}
+
+/** Why records failed on the last run — the reason, not just the count. */
+export interface OperationsFailureReason {
+  count: number
+  code: string
+  reason: string
+}
+
+/** One earlier run, for the trend beside today's number. */
+export interface OperationsAttempt {
+  runId: string
+  state: RunState
+  at: string
+  read: number
+  written: number
+  failed: number
+  seconds: number
+}
+
+export interface OperationsSchedule {
+  name: string
+  cron: string
+  timezone: string
+  lastFiredAt: string | null
+  /** So "it has not run" reads as late, or as simply not due yet. */
+  nextDueAt: string | null
 }
 
 export interface OperationsDashboard {
@@ -200,6 +213,10 @@ export interface OperationsDashboard {
   pipelines: PipelineHealth[]
   watched: number
   healthy: number
+  /** In flight now. Excludes paused runs — they hold a slot but nothing is happening. */
+  live: OperationsLiveRun[]
+  /** Every run in the window, watched or not. */
+  totals: OperationsTotals
   generatedAt: string
 }
 
