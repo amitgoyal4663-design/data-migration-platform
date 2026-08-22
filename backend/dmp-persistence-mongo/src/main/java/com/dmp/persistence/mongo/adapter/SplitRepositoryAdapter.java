@@ -1,6 +1,8 @@
 package com.dmp.persistence.mongo.adapter;
 
 import com.dmp.application.port.out.SplitRepository;
+import com.dmp.application.common.Page;
+import com.dmp.application.common.PageQuery;
 import com.dmp.domain.run.RunId;
 import com.dmp.domain.run.Split;
 import com.dmp.domain.run.SplitId;
@@ -64,6 +66,47 @@ public class SplitRepositoryAdapter implements SplitRepository {
                 .addCriteria(Criteria.where("runId").is(runId.value()))
                 .with(Sort.by(Sort.Direction.ASC, "index"));
         return mongo.find(query, SplitDocument.class).stream().map(SplitMapper::toDomain).toList();
+    }
+
+    @Override
+    public Page<Split> findByRun(TenantId tenantId, RunId runId, PageQuery pageQuery) {
+        Criteria criteria = Criteria.where("runId").is(runId.value());
+
+        // Counted separately rather than derived from the page, because a short page means "this
+        // is the end" and nothing about how many there were.
+        long total = mongo.count(scoped(tenantId).addCriteria(criteria), SplitDocument.class);
+
+        Query query = scoped(tenantId)
+                .addCriteria(criteria)
+                .with(Sort.by(Sort.Direction.ASC, "index"))
+                .skip((long) pageQuery.page() * pageQuery.size())
+                .limit(pageQuery.size());
+
+        List<Split> splits = mongo.find(query, SplitDocument.class).stream()
+                .map(SplitMapper::toDomain)
+                .toList();
+        return Page.of(splits, pageQuery, total);
+    }
+
+    @Override
+    public java.util.Map<SplitState, Long> countByState(TenantId tenantId, RunId runId) {
+        org.springframework.data.mongodb.core.aggregation.Aggregation aggregation =
+                org.springframework.data.mongodb.core.aggregation.Aggregation.newAggregation(
+                        org.springframework.data.mongodb.core.aggregation.Aggregation.match(
+                                Criteria.where("tenantId").is(tenantId.value())
+                                        .and("runId").is(runId.value())),
+                        org.springframework.data.mongodb.core.aggregation.Aggregation
+                                .group("state").count().as("count"));
+
+        java.util.Map<SplitState, Long> counts = new java.util.EnumMap<>(SplitState.class);
+        for (org.bson.Document row : mongo.aggregate(aggregation, SplitDocument.class, org.bson.Document.class)) {
+            String state = row.getString("_id");
+            if (state != null) {
+                counts.merge(SplitState.valueOf(state), row.get("count", Number.class).longValue(),
+                        Long::sum);
+            }
+        }
+        return counts;
     }
 
     @Override

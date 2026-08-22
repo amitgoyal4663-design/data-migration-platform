@@ -85,6 +85,14 @@ public class UnavailableRecordIndex {
             }
 
             @Override
+            public Map<String, Long> countByOutcome(TenantId tenantId, RunId runId) {
+                // Empty rather than a map of zeros, because the two mean different things to a
+                // reconciliation report: no entries is a legitimate configuration, while an
+                // outcome present with a count of zero is a claim about what happened.
+                return Map.of();
+            }
+
+            @Override
             public boolean supportsContentSearch() {
                 return false;
             }

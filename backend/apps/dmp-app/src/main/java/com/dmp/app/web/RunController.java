@@ -2,6 +2,7 @@ package com.dmp.app.web;
 
 import com.dmp.app.web.dto.PageResponse;
 import com.dmp.app.web.dto.RunDtos;
+import com.dmp.application.common.Page;
 import com.dmp.application.common.PageQuery;
 import com.dmp.application.common.TenantContext;
 import com.dmp.application.port.out.CheckpointRepository;
@@ -17,6 +18,7 @@ import com.dmp.domain.run.Run;
 import com.dmp.domain.run.RunId;
 import com.dmp.domain.run.RunState;
 import com.dmp.domain.run.RunTrigger;
+import com.dmp.domain.run.Split;
 import com.dmp.domain.run.SplitId;
 import com.dmp.engine.RunOrchestrator;
 import io.swagger.v3.oas.annotations.Operation;
@@ -46,11 +48,16 @@ import java.util.Set;
 @Tag(name = "Runs", description = "Start, monitor, pause and stop pipeline executions")
 public class RunController {
 
+    private static final org.slf4j.Logger log =
+            org.slf4j.LoggerFactory.getLogger(RunController.class);
+
     private final RunOrchestrator orchestrator;
     private final RunRepository runs;
     private final SplitRepository splits;
     private final CheckpointRepository checkpoints;
     private final RecordErrorPort recordErrors;
+    private final com.dmp.application.port.out.RecordIndexPort recordIndex;
+    private final com.dmp.application.port.out.PipelineRepository pipelines;
     private final TenantContext tenantContext;
     private final Clock clock;
 
@@ -59,6 +66,8 @@ public class RunController {
                          SplitRepository splits,
                          CheckpointRepository checkpoints,
                          RecordErrorPort recordErrors,
+                         com.dmp.application.port.out.RecordIndexPort recordIndex,
+                         com.dmp.application.port.out.PipelineRepository pipelines,
                          TenantContext tenantContext,
                          Clock clock) {
         this.orchestrator = orchestrator;
@@ -66,6 +75,8 @@ public class RunController {
         this.splits = splits;
         this.checkpoints = checkpoints;
         this.recordErrors = recordErrors;
+        this.recordIndex = recordIndex;
+        this.pipelines = pipelines;
         this.tenantContext = tenantContext;
         this.clock = clock;
     }
@@ -164,18 +175,147 @@ public class RunController {
     @Operation(summary = "List a run's chunks",
             description = "Shows which worker holds each chunk, how many attempts it has taken, "
                     + "and why any of them failed.")
-    public List<RunDtos.ChunkResponse> chunks(@PathVariable String runId) {
+    public PageResponse<RunDtos.ChunkResponse> chunks(
+            @PathVariable String runId,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size) {
+
         Run run = require(runId);
+        // A page of chunks, not all of them. This answered a screen showing fifty rows with every
+        // chunk of the run — a hundred thousand documents and a hundred thousand DTOs for a run
+        // that size, every time somebody opened it or it refreshed.
+        Page<Split> chunks = splits.findByRun(run.tenantId(), run.id(), PageQuery.of(page, size));
 
         // Counters live on the checkpoints, not the chunks. Joined here rather than duplicated
         // onto the chunk on every batch: a chunk is written once per state change, a checkpoint
         // many times per chunk, and keeping a second copy in step would be a write per batch.
-        Map<SplitId, Checkpoint> progress = checkpoints.findByRun(run.tenantId(), run.id())
+        //
+        // Fetched for this page's chunks only — loading the run's whole checkpoint collection to
+        // annotate fifty rows was the second half of the same problem.
+        Map<SplitId, Checkpoint> progress = checkpoints
+                .findBySplits(run.tenantId(), chunks.content().stream().map(Split::id).toList())
                 .stream().collect(java.util.stream.Collectors.toMap(Checkpoint::splitId, c -> c));
 
-        return splits.findByRun(run.tenantId(), run.id()).stream()
-                .map(split -> RunDtos.ChunkResponse.from(split, progress.get(split.id())))
-                .toList();
+        // PageResponse rather than the application's own Page, so this endpoint answers with the
+        // hasNext every other paged endpoint here does — and the console's infinite scroll knows
+        // when to stop asking.
+        return PageResponse.from(chunks,
+                split -> RunDtos.ChunkResponse.from(split, progress.get(split.id())));
+    }
+
+    @GetMapping("/runs/{runId}/chunk-summary")
+    @Operation(summary = "How many of a run's chunks are in each state",
+            description = "The numbers a screen needs to decide whether a run can be retried, and "
+                    + "how much would be re-sent if it were. A few counts rather than the chunks "
+                    + "themselves: working them out in the browser meant fetching every chunk of "
+                    + "the run to render a banner and a button.")
+    public RunDtos.ChunkSummaryResponse chunkSummary(@PathVariable String runId) {
+        Run run = require(runId);
+        Map<com.dmp.domain.run.SplitState, Long> byState =
+                splits.countByState(run.tenantId(), run.id());
+
+        // Records already delivered by chunks that did not finish, which is what a retry would send
+        // a second time. Only the failed chunks are loaded, and a run with many of those has bigger
+        // problems than this query.
+        List<Split> failed = new java.util.ArrayList<>();
+        failed.addAll(splits.findByRunAndState(run.tenantId(), run.id(),
+                com.dmp.domain.run.SplitState.FAILED));
+        failed.addAll(splits.findByRunAndState(run.tenantId(), run.id(),
+                com.dmp.domain.run.SplitState.ABANDONED));
+
+        long recordsAtRisk = checkpoints
+                .findBySplits(run.tenantId(), failed.stream().map(Split::id).toList())
+                .stream().mapToLong(Checkpoint::recordsWritten).sum();
+
+        return RunDtos.ChunkSummaryResponse.from(byState, recordsAtRisk);
+    }
+
+    @GetMapping("/runs/{runId}/reconciliation")
+    @Operation(summary = "The run's balance sheet, and the verdict on it",
+            description = """
+                    What a migration is signed off with: what the source handed over, what was
+                    deliberately dropped, what the destination took, what it refused, and whether
+                    anything is left over. Anything other than zero on the closing line is data
+                    loss.
+
+                    Where the pipeline indexes records, the sheet is checked against that index —
+                    a second count, written by a different code path to a different store. That
+                    comparison is the only check here capable of catching a defect in the counting
+                    itself, which is why it is reported separately rather than folded in.
+                    """)
+    public RunDtos.ReconciliationResponse reconciliation(@PathVariable String runId) {
+        return reconcile(require(runId));
+    }
+
+    @GetMapping(value = "/runs/{runId}/reconciliation.csv", produces = "text/csv")
+    @Operation(summary = "The same balance sheet as a file",
+            description = "For attaching to whatever the sign-off actually happens in. The same "
+                    + "rows as the JSON, so the printed page and the screen cannot disagree.")
+    public org.springframework.http.ResponseEntity<String> reconciliationCsv(
+            @PathVariable String runId) {
+
+        RunDtos.ReconciliationResponse report = reconcile(require(runId));
+
+        StringBuilder csv = new StringBuilder();
+        csv.append("section,label,value,detail,note\n");
+        row(csv, "verdict", "Verdict", report.verdict(), "", "");
+        row(csv, "verdict", "Run", report.runId(), "", "");
+        row(csv, "verdict", "Pipeline", report.pipelineName(), "", "");
+        row(csv, "verdict", "Generated", report.generatedAt().toString(), "", "");
+        for (RunDtos.ReconciliationLine line : report.sheet()) {
+            row(csv, "sheet", line.label(), String.valueOf(line.count()), line.kind(), line.note());
+        }
+        for (RunDtos.ReconciliationCheck check : report.checks()) {
+            row(csv, "check", check.label(), String.valueOf(check.expected()),
+                    check.actual() + (check.passed() ? " (ok)" : " (differs by "
+                            + check.difference() + ")"), check.note());
+        }
+
+        return org.springframework.http.ResponseEntity.ok()
+                .header("Content-Disposition",
+                        "attachment; filename=\"reconciliation-" + report.runId() + ".csv\"")
+                .body(csv.toString());
+    }
+
+    /**
+     * Builds the report, for both representations of it.
+     *
+     * <p>The index is asked for its tally and a failure to answer is not allowed to fail the
+     * report. A deployment with no search backend, or one whose cluster is briefly unreachable,
+     * still has a run's own counters — and the sheet built from those alone is the larger part of
+     * the answer. Reporting nothing because the corroborating source is down would withhold what
+     * is known in order to avoid admitting what is not.
+     */
+    private RunDtos.ReconciliationResponse reconcile(Run run) {
+        Map<String, Long> byOutcome;
+        try {
+            byOutcome = recordIndex.countByOutcome(run.tenantId(), run.id());
+        } catch (RuntimeException e) {
+            log.warn("Could not read the record index while reconciling run {}: {}",
+                    run.id(), e.getMessage());
+            byOutcome = Map.of();
+        }
+
+        String pipelineName = pipelines.findById(run.tenantId(), run.pipelineId())
+                .map(com.dmp.domain.pipeline.Pipeline::name)
+                .orElse(run.pipelineId().toString());
+
+        return RunDtos.ReconciliationResponse.from(
+                com.dmp.domain.run.Reconciliation.of(run.state(), run.metrics(), byOutcome),
+                run, pipelineName, clock.instant());
+    }
+
+    /** One CSV row, with the quoting a note containing a comma requires. */
+    private static void row(StringBuilder csv, String section, String label, String value,
+                            String detail, String note) {
+        csv.append(quote(section)).append(',').append(quote(label)).append(',')
+                .append(quote(value)).append(',').append(quote(detail)).append(',')
+                .append(quote(note)).append('\n');
+    }
+
+    private static String quote(String value) {
+        String text = value == null ? "" : value;
+        return '"' + text.replace("\"", "\"\"") + '"';
     }
 
     @GetMapping("/runs/{runId}/errors")

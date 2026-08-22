@@ -179,6 +179,130 @@ public final class RunDtos {
         }
     }
 
+    /**
+     * A run's chunks counted by state, and what a retry would re-send.
+     *
+     * <p>Exists so a console can answer "can this be retried, and at what cost" without holding the
+     * chunks themselves.
+     */
+    @Schema(name = "ChunkSummaryResponse")
+    public record ChunkSummaryResponse(
+            @Schema(description = "Chunk count for each state that has any")
+            java.util.Map<String, Long> byState,
+            @Schema(description = "Chunks that failed or were abandoned")
+            long failed,
+            @Schema(description = "Chunks that never finished - cancelled, still pending, still "
+                    + "running, or parked on a destination that answers later")
+            long unfinished,
+            @Schema(description = "Records already written by chunks that did not finish, and so "
+                    + "the number a retry would deliver a second time")
+            long recordsAtRisk) {
+
+        public static ChunkSummaryResponse from(
+                java.util.Map<com.dmp.domain.run.SplitState, Long> byState, long recordsAtRisk) {
+
+            long failed = count(byState, com.dmp.domain.run.SplitState.FAILED)
+                    + count(byState, com.dmp.domain.run.SplitState.ABANDONED);
+            // WAITING_EXTERNAL belongs here, matching the engine's own retry scope: a run stopped
+            // while a chunk was parked on a bulk job cancels it without collecting the
+            // destination's per-record verdicts, so that chunk did not finish.
+            long unfinished = count(byState, com.dmp.domain.run.SplitState.CANCELLED)
+                    + count(byState, com.dmp.domain.run.SplitState.PENDING)
+                    + count(byState, com.dmp.domain.run.SplitState.RUNNING)
+                    + count(byState, com.dmp.domain.run.SplitState.WAITING_EXTERNAL);
+
+            java.util.Map<String, Long> named = new java.util.LinkedHashMap<>();
+            byState.forEach((state, n) -> named.put(state.name(), n));
+            return new ChunkSummaryResponse(named, failed, unfinished, recordsAtRisk);
+        }
+
+        private static long count(java.util.Map<com.dmp.domain.run.SplitState, Long> byState,
+                                  com.dmp.domain.run.SplitState state) {
+            return byState.getOrDefault(state, 0L);
+        }
+    }
+
+    /**
+     * A run's balance sheet, and the verdict on it.
+     *
+     * <p>The artifact a migration is signed off with. Deliberately flat and label-carrying: the
+     * console renders it without knowing what any particular line means, and the CSV export is the
+     * same rows written out, so the printed page and the screen can never disagree.
+     */
+    @Schema(name = "ReconciliationResponse")
+    public record ReconciliationResponse(
+            @Schema(description = "BALANCED, DISCREPANCY, or INCOMPLETE while the run is still "
+                    + "going. The only part most people read.")
+            String verdict,
+            @Schema(description = "The balance, in the order it should be read")
+            List<ReconciliationLine> sheet,
+            @Schema(description = "Comparisons between the run's own counters and the record "
+                    + "index, which are written by different code paths to different stores. "
+                    + "Empty when the pipeline does not index records.")
+            List<ReconciliationCheck> checks,
+            @Schema(description = "The record index's own tally, by outcome. Outcomes that did "
+                    + "not occur are absent rather than zero.")
+            java.util.Map<String, Long> byOutcome,
+            long indexedTotal,
+            @Schema(description = "Whether there is an index to compare against at all")
+            boolean indexed,
+            @Schema(description = "Whether the run has finished. A mid-run balance is arithmetic "
+                    + "about a moving target.")
+            boolean complete,
+            @Schema(description = "The run this reconciles, for a report saved away from the tool")
+            String runId,
+            String pipelineName,
+            Instant generatedAt) {
+
+        public static ReconciliationResponse from(com.dmp.domain.run.Reconciliation source,
+                                                  Run run, String pipelineName, Instant now) {
+            return new ReconciliationResponse(
+                    source.verdict().name(),
+                    source.sheet().stream().map(ReconciliationLine::from).toList(),
+                    source.checks().stream().map(ReconciliationCheck::from).toList(),
+                    source.byOutcome(),
+                    source.indexedTotal(),
+                    source.indexed(),
+                    source.complete(),
+                    run.id().toString(),
+                    pipelineName,
+                    now);
+        }
+    }
+
+    @Schema(name = "ReconciliationLine")
+    public record ReconciliationLine(
+            String label,
+            long count,
+            @Schema(description = "TOTAL, DEDUCTION, SUBTOTAL, RESULT, PENDING or BALANCE — so a "
+                    + "console can style the row without parsing its label")
+            String kind,
+            @Schema(description = "Why this line is here, in the language of the person reading it")
+            String note) {
+
+        static ReconciliationLine from(com.dmp.domain.run.Reconciliation.Line line) {
+            return new ReconciliationLine(line.label(), line.count(), line.kind().name(),
+                    line.note());
+        }
+    }
+
+    @Schema(name = "ReconciliationCheck")
+    public record ReconciliationCheck(
+            String label,
+            @Schema(description = "What the run's own counters say")
+            long expected,
+            @Schema(description = "What the record index says")
+            long actual,
+            long difference,
+            boolean passed,
+            String note) {
+
+        static ReconciliationCheck from(com.dmp.domain.run.Reconciliation.Check check) {
+            return new ReconciliationCheck(check.label(), check.expected(), check.actual(),
+                    check.difference(), check.passed(), check.note());
+        }
+    }
+
     @Schema(name = "ChunkResponse")
     public record ChunkResponse(
             String id,

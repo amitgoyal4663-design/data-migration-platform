@@ -32,6 +32,7 @@ import { useState } from 'react'
 import { Link as RouterLink, useNavigate, useParams } from 'react-router-dom'
 import Link from '@mui/material/Link'
 import {
+  useChunkSummary,
   useChunks,
   useErrorGroups,
   useReplayRun,
@@ -45,6 +46,7 @@ import {
 import { api } from '@/api/client'
 import { RetryDialog, type RetryTarget } from '@/components/RetryDialog'
 import { ReplayDialog } from '@/components/ReplayDialog'
+import { ReconciliationPanel } from '@/components/ReconciliationPanel'
 import { RunTimeline } from '@/components/RunTimeline'
 import { PageHeader } from '@/components/PageHeader'
 import { StatTile } from '@/components/StatTile'
@@ -52,6 +54,7 @@ import { ChunkStateChip, RunStateChip } from '@/components/StateChip'
 import { ErrorPanel, Loading } from '@/components/Feedback'
 import { formatDuration } from './DashboardPage'
 import { muted, tabular } from '@/theme'
+import { MoreOnScroll } from '@/components/MoreOnScroll'
 
 /**
  * A run's parameters in the shape the start endpoint takes.
@@ -79,6 +82,7 @@ export function RunDetailPage() {
 
   const live = Boolean(run.data && !run.data.terminal)
   const chunks = useChunks(runId, live)
+  const summary = useChunkSummary(runId, live)
   const errors = useRunErrors(runId)
   const groups = useErrorGroups(runId)
   const control = useRunControl(runId)
@@ -101,25 +105,23 @@ export function RunDetailPage() {
   const transformed =
     metrics.recordsFiltered > 0 || metrics.recordsProduced !== metrics.recordsRead
 
-  const allChunks = chunks.data ?? []
+  // The pages loaded so far, which is what the table draws. Everything below that needs to be
+  // true of the whole run comes from the summary instead — deriving it from these would count only
+  // what happened to be on screen.
+  // Not memoised: this sits below the early returns above, and a hook there runs on some renders
+  // and not others — which is what "rendered more hooks than during the previous render" means.
+  // Flattening a handful of ten-row pages is not worth the hazard.
+  const loadedChunks = chunks.data?.pages.flatMap((page) => page.content) ?? []
+  const totalChunks = chunks.data?.pages[0]?.totalElements ?? 0
 
   // Chunks generated as the run proceeds carry no range of their own. There is no denominator to
-  // report a percentage against until the source is exhausted.
-  const lazilyChunked = allChunks.some(
-    (chunk) => (chunk.spec as { _dmpOpenEnded?: boolean })._dmpOpenEnded === true,
-  )
-  const failedChunks = allChunks.filter((c) => c.state === 'ABANDONED' || c.state === 'FAILED')
-  // WAITING_EXTERNAL belongs here, matching the engine's own retry scope. A run stopped while a
-  // chunk was parked on a bulk job cancels that chunk without collecting the destination's
-  // per-record verdicts, so it did not finish — and omitting it here would report fewer chunks
-  // than the retry actually re-runs.
-  const cancelledChunks = allChunks.filter(
-    (c) =>
-      c.state === 'CANCELLED' ||
-      c.state === 'PENDING' ||
-      c.state === 'RUNNING' ||
-      c.state === 'WAITING_EXTERNAL',
-  )
+  // report a percentage against until the source is exhausted. A property of how the run was
+  // planned, so the first chunk answers it for all of them.
+  const lazilyChunked =
+    (loadedChunks[0]?.spec as { _dmpOpenEnded?: boolean } | undefined)?._dmpOpenEnded === true
+
+  const failedCount = summary.data?.failed ?? 0
+  const unfinishedCount = summary.data?.unfinished ?? 0
 
   // Only a finished run can be retried, and only one with something left to do. A run where every
   // chunk succeeded has nothing to offer, and showing the button anyway would invite a click that
@@ -127,7 +129,7 @@ export function RunDetailPage() {
   const retryable =
     current.terminal &&
     current.state !== 'ARCHIVED' &&
-    failedChunks.length + cancelledChunks.length > 0
+    failedCount + unfinishedCount > 0
 
   // Replay is the other half, and answers a different question. Retry re-reads chunks that failed;
   // replay re-sends records rejected inside chunks that succeeded. A run can offer both, either, or
@@ -149,11 +151,11 @@ export function RunDetailPage() {
   const openRunRetry = () =>
     setRetryTarget({
       label: stopped
-        ? `Resume ${cancelledChunks.length} unfinished chunk${cancelledChunks.length === 1 ? '' : 's'}`
-        : `Retry ${failedChunks.length} failed chunk${failedChunks.length === 1 ? '' : 's'}`,
-      chunkCount: failedChunks.length,
-      cancelledCount: cancelledChunks.length,
-      recordsAtRisk: failedChunks.reduce((sum, c) => sum + c.recordsWritten, 0),
+        ? `Resume ${unfinishedCount} unfinished chunk${unfinishedCount === 1 ? '' : 's'}`
+        : `Retry ${failedCount} failed chunk${failedCount === 1 ? '' : 's'}`,
+      chunkCount: failedCount,
+      cancelledCount: unfinishedCount,
+      recordsAtRisk: summary.data?.recordsAtRisk ?? 0,
       resuming: stopped,
     })
 
@@ -409,7 +411,7 @@ export function RunDetailPage() {
       </Typography>
 
       <Tabs value={tab} onChange={(_, next) => setTab(next)} sx={{ mb: 2 }}>
-        <Tab label={`Chunks (${chunks.data?.length ?? 0})`} sx={{ textTransform: 'none' }} />
+        <Tab label={`Chunks (${totalChunks})`} sx={{ textTransform: 'none' }} />
         <Tab
           label={`Failures (${groups.data?.length ?? 0})`}
           sx={{ textTransform: 'none' }}
@@ -419,12 +421,17 @@ export function RunDetailPage() {
           sx={{ textTransform: 'none' }}
         />
         <Tab label="Timeline" sx={{ textTransform: 'none' }} />
+        <Tab label="Reconciliation" sx={{ textTransform: 'none' }} />
       </Tabs>
 
       {tab === 0 && (
         <ChunkTable
           runId={runId}
-          chunks={allChunks}
+          chunks={loadedChunks}
+          hasMore={chunks.hasNextPage}
+          loadingMore={chunks.isFetchingNextPage}
+          onLoadMore={() => void chunks.fetchNextPage()}
+          total={totalChunks}
           onRetry={
             retryable
               ? (chunk) =>
@@ -455,6 +462,9 @@ export function RunDetailPage() {
         * being looked at.
         */}
       {tab === 3 && <RunTimeline runId={runId} />}
+
+      {/* Same reasoning as the timeline: an aggregation over the whole index, behind a tab. */}
+      {tab === 4 && <ReconciliationPanel runId={runId} live={live} />}
 
       <RetryDialog
         open={retryTarget !== null}
@@ -831,13 +841,54 @@ function ChunkActions({
   )
 }
 
+/**
+ * The chunk's number, which is also how its id is copied.
+ *
+ * <p>The id is what finds a chunk in the application log, in the stage log and in the record
+ * index, and it was on no screen at all. Shown as a column of its own it wrapped a UUID onto three
+ * lines in a cell sized for a single digit; given an icon it widened a table that has no width to
+ * spare. So the number itself is the target: identical layout, identical alignment, one more thing
+ * the cell does.
+ */
+function ChunkIndex({ chunk }: { chunk: import('@/api/types').Chunk }) {
+  const [copied, setCopied] = useState(false)
+
+  return (
+    <Tooltip title={copied ? 'Copied' : `Click to copy chunk id ${chunk.id}`}>
+      <Box
+        component="span"
+        onClick={() => {
+          void navigator.clipboard.writeText(chunk.id)
+          setCopied(true)
+          window.setTimeout(() => setCopied(false), 1500)
+        }}
+        sx={{
+          cursor: 'pointer',
+          color: copied ? 'success.main' : 'inherit',
+          '&:hover': { color: 'primary.main' },
+        }}
+      >
+        {chunk.index}
+      </Box>
+    </Tooltip>
+  )
+}
+
 function ChunkTable({
   runId,
   chunks,
+  hasMore,
+  loadingMore,
+  onLoadMore,
+  total,
   onRetry,
 }: {
   runId: string
   chunks: import('@/api/types').Chunk[]
+  hasMore: boolean
+  loadingMore: boolean
+  onLoadMore: () => void
+  total: number
   onRetry?: (chunk: import('@/api/types').Chunk) => void
 }) {
   if (chunks.length === 0) {
@@ -868,25 +919,14 @@ function ChunkTable({
         <TableBody>
           {chunks.map((chunk) => (
             <TableRow key={chunk.id} hover>
-              <TableCell sx={tabular}>{chunk.index}</TableCell>
+              <TableCell sx={tabular}>
+                <ChunkIndex chunk={chunk} />
+              </TableCell>
               <TableCell>
                 <ChunkStateChip state={chunk.state} />
               </TableCell>
               <TableCell sx={{ maxWidth: 220 }}>
-                <Tooltip
-                  title={
-                    <Box
-                      component="pre"
-                      sx={{ m: 0, font: 'inherit', fontFamily: 'ui-monospace, monospace' }}
-                    >
-                      {JSON.stringify(chunk.spec, null, 2)}
-                    </Box>
-                  }
-                >
-                  <Typography variant="caption" sx={{ ...tabular, ...ellipsis, cursor: 'help' }}>
-                    {describeRange(chunk.spec)}
-                  </Typography>
-                </Tooltip>
+                <SpecCell spec={chunk.spec} />
               </TableCell>
               <TableCell>
                 {chunk.assignedTo ? (
@@ -967,6 +1007,17 @@ function ChunkTable({
           ))}
         </TableBody>
       </Table>
+
+      {/* Fetches the next page as it is reached. The endpoint pages now, so this asks the server
+          for more rather than revealing rows the browser was already holding. */}
+      <MoreOnScroll
+        hasMore={hasMore}
+        loading={loadingMore}
+        onReach={onLoadMore}
+        shown={chunks.length}
+        total={total}
+        noun="chunks"
+      />
     </Paper>
   )
 }
@@ -1087,6 +1138,44 @@ function RejectedRecords({ errors }: { errors: import('@/api/types').RecordError
         </Paper>
       ))}
     </Stack>
+  )
+}
+
+/**
+ * The range a chunk covers, with the connector's own spec behind it.
+ *
+ * <p>The spec is worth showing where it says something — a key range, a result-chunk index, a file
+ * path. It is not worth showing when everything in it is the engine's own bookkeeping: a chunk
+ * generated as the run proceeds has no range, so its spec holds a single internal marker saying
+ * exactly that, and a tooltip reading {@code {"_dmpOpenEnded": true}} tells the reader less than
+ * the words already in the cell.
+ */
+function SpecCell({ spec }: { spec: Record<string, unknown> }) {
+  const readable = Object.fromEntries(
+    Object.entries((spec ?? {}) as Record<string, unknown>).filter(
+      ([key]) => !key.startsWith('_dmp'),
+    ),
+  )
+  const label = (
+    <Typography variant="caption" sx={{ ...tabular, ...ellipsis }}>
+      {describeRange(spec)}
+    </Typography>
+  )
+
+  if (Object.keys(readable).length === 0) {
+    return label
+  }
+
+  return (
+    <Tooltip
+      title={
+        <Box component="pre" sx={{ m: 0, font: 'inherit', fontFamily: 'ui-monospace, monospace' }}>
+          {JSON.stringify(readable, null, 2)}
+        </Box>
+      }
+    >
+      <Box sx={{ cursor: 'help' }}>{label}</Box>
+    </Tooltip>
   )
 }
 

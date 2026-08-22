@@ -229,6 +229,58 @@ public class OpenSearchRecordIndex implements RecordIndexPort {
         return findByRun(tenantId, runId, null, new PageQuery(0, 1, null, false)).totalElements();
     }
 
+    /**
+     * One aggregation rather than one count per outcome.
+     *
+     * <p>Six counts would be six round trips against an index holding hundreds of millions of
+     * documents, and — worse — six separate points in time. A record whose chunk is retried between
+     * the second query and the fifth would be counted under two outcomes or under none, and a
+     * reconciliation report that cannot be trusted to have counted a single population is not a
+     * reconciliation report.
+     *
+     * <p>{@code size: 0} because the documents themselves are never wanted here; only the buckets.
+     */
+    @Override
+    public java.util.Map<String, Long> countByOutcome(TenantId tenantId, RunId runId) {
+        ArrayNode filters = Json.mapper().createArrayNode();
+        filters.add(term("tenantId", tenantId.value().toString()));
+        filters.add(term("runId", runId.value().toString()));
+
+        ObjectNode body = Json.newObject();
+        body.put("size", 0);
+        body.putObject("query").putObject("bool").set("filter", filters);
+        body.putObject("aggs").putObject("byOutcome").putObject("terms")
+                .put("field", "outcome")
+                // Above the number of outcomes that exist, so a bucket is never silently dropped
+                // and a new outcome added to the enum does not quietly stop being reported.
+                .put("size", 50);
+
+        HttpResponse<String> response = send(
+                request(index + "/_search").POST(body(body.toString()))
+                        .header("Content-Type", "application/json"),
+                "count records by outcome");
+
+        if (response == null || response.statusCode() >= 300) {
+            throw new IllegalStateException("Counting records by outcome failed"
+                    + (response == null ? "" : ": HTTP " + response.statusCode()
+                    + " — " + truncate(response.body())));
+        }
+
+        JsonNode root;
+        try {
+            root = Json.mapper().readTree(response.body());
+        } catch (IOException e) {
+            throw new IllegalStateException(
+                    "Counting records by outcome returned a response that is not JSON", e);
+        }
+
+        java.util.Map<String, Long> counts = new java.util.LinkedHashMap<>();
+        for (JsonNode bucket : root.path("aggregations").path("byOutcome").path("buckets")) {
+            counts.put(bucket.path("key").asText(), bucket.path("doc_count").asLong());
+        }
+        return counts;
+    }
+
     @Override
     public boolean supportsContentSearch() {
         return true;

@@ -68,6 +68,22 @@ public interface RecordIndexPort {
     long countByRun(TenantId tenantId, RunId runId);
 
     /**
+     * A run's entries counted by outcome, for reconciling a migration.
+     *
+     * <p>The run's own counters hold one number for every kind of failure, because they are
+     * incremented by workers who add rather than classify. This separates them — rejected, refused
+     * as part of a failed call, thrown on by a script — and it does so from a store written by a
+     * different code path, which is what makes the comparison worth making at all.
+     *
+     * <p>Answers only for outcomes that occurred; a zero is expressed by absence. An implementation
+     * with no index returns nothing, which the caller must read as <em>this pipeline did not
+     * index</em> rather than as <em>nothing happened</em>.
+     *
+     * @return outcome name to count, keyed by {@link Outcome#name()}
+     */
+    java.util.Map<String, Long> countByOutcome(TenantId tenantId, RunId runId);
+
+    /**
      * Free-text and field search across indexed records.
      *
      * <p>Only meaningful where the pipeline indexes payloads; an identity-only index has nothing to

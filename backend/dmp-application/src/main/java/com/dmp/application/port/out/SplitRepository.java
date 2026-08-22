@@ -1,5 +1,7 @@
 package com.dmp.application.port.out;
 
+import com.dmp.application.common.Page;
+import com.dmp.application.common.PageQuery;
 import com.dmp.domain.run.RunId;
 import com.dmp.domain.run.Split;
 import com.dmp.domain.run.SplitId;
@@ -25,6 +27,25 @@ public interface SplitRepository {
     Optional<Split> findById(TenantId tenantId, SplitId id);
 
     List<Split> findByRun(TenantId tenantId, RunId runId);
+
+    /**
+     * One page of a run's chunks, in index order.
+     *
+     * <p>Separate from {@link #findByRun} rather than replacing it: the engine genuinely wants
+     * every chunk — to decide whether a run is finished, to reap orphans — and a console genuinely
+     * does not. A run of a hundred thousand chunks was answering a screen with a hundred thousand
+     * documents, then a hundred thousand DTOs, to draw the fifty rows that fit.
+     */
+    Page<Split> findByRun(TenantId tenantId, RunId runId, PageQuery pageQuery);
+
+    /**
+     * How many of a run's chunks are in each state.
+     *
+     * <p>An aggregation rather than a list, for the handful of numbers a screen needs to decide
+     * whether a run can be retried. Working those out by downloading every chunk is what made a
+     * console fetch a hundred thousand documents to render a banner.
+     */
+    java.util.Map<SplitState, Long> countByState(TenantId tenantId, RunId runId);
 
     List<Split> findByRunAndState(TenantId tenantId, RunId runId, SplitState state);
 

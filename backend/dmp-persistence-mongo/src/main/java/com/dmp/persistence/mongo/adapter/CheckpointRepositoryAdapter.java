@@ -49,6 +49,18 @@ public class CheckpointRepositoryAdapter implements CheckpointRepository {
     }
 
     @Override
+    public List<Checkpoint> findBySplits(TenantId tenantId, List<SplitId> splitIds) {
+        if (splitIds.isEmpty()) {
+            return List.of();
+        }
+        Query query = scoped(tenantId).addCriteria(Criteria.where("splitId")
+                .in(splitIds.stream().map(SplitId::value).toList()));
+        return mongo.find(query, CheckpointDocument.class).stream()
+                .map(CheckpointMapper::toDomain)
+                .toList();
+    }
+
+    @Override
     public List<Checkpoint> findByRun(TenantId tenantId, RunId runId) {
         Query query = scoped(tenantId).addCriteria(Criteria.where("runId").is(runId.value()));
         return mongo.find(query, CheckpointDocument.class).stream()

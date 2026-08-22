@@ -1,5 +1,6 @@
 import Alert from '@mui/material/Alert'
 import Box from '@mui/material/Box'
+import Button from '@mui/material/Button'
 import Chip from '@mui/material/Chip'
 import MenuItem from '@mui/material/MenuItem'
 import Stack from '@mui/material/Stack'
@@ -9,9 +10,11 @@ import Typography from '@mui/material/Typography'
 import Collapse from '@mui/material/Collapse'
 import IconButton from '@mui/material/IconButton'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useRunStages } from '@/api/hooks'
 import { muted, tabular } from '@/theme'
+import { shortId } from '@/api/ids'
+import { MoreOnScroll } from '@/components/MoreOnScroll'
 import type { StageLogEntry } from '@/api/types'
 
 /**
@@ -35,7 +38,16 @@ export function RunTimeline({ runId }: { runId: string }) {
   // end — and a filter that silently matches nothing is indistinguishable from a run that did
   // nothing.
   const stages = useRunStages(runId, chunkId.trim() || undefined, stage || undefined)
-  const entries = stages.data?.content ?? []
+  const entries = useMemo(
+    () => stages.data?.pages.flatMap((page) => page.content) ?? [],
+    [stages.data],
+  )
+  const total = stages.data?.pages[0]?.totalElements ?? 0
+
+  // Everything fetched is drawn. The page size is what decides how much arrives at a time, so a
+  // scroll is a request rather than a request feeding several scrolls — which is what holding
+  // entries back to reveal them locally amounted to.
+  const visible = useMemo(() => groupByTrace(entries), [entries])
 
   return (
     <Stack spacing={2}>
@@ -83,65 +95,106 @@ export function RunTimeline({ runId }: { runId: string }) {
         </Alert>
       )}
 
-      {groupByTrace(entries).map((cycle) => (
+      {visible.map((cycle) => (
         <TraceGroup key={cycle.traceId} traceId={cycle.traceId} entries={cycle.entries} />
       ))}
 
-      {stages.data && stages.data.totalElements > entries.length && (
-        <Typography variant="caption" sx={{ color: muted }}>
-          Showing the first {entries.length} of {stages.data.totalElements.toLocaleString()} stages.
-          Narrow by chunk to see the rest.
-        </Typography>
-      )}
+      {/* Loads as it is reached, rather than telling the reader the rest exists somewhere they
+          cannot get to — which is what "showing the first 200" amounted to on a run whose stages
+          run into the hundreds of thousands. */}
+      <MoreOnScroll
+        hasMore={stages.hasNextPage}
+        loading={stages.isFetchingNextPage}
+        onReach={() => void stages.fetchNextPage()}
+        shown={entries.length}
+        total={total}
+      />
     </Stack>
   )
 }
 
+/**
+ * How many of a cycle's deliveries are drawn before the reader asks for more.
+ *
+ * <p>Small on purpose. A per-record delivery — one call per record, so one delivery per record —
+ * would otherwise put a hundred thousand rows into a single group, and ten is enough to see what
+ * a cycle is doing before deciding whether to look further.
+ */
+const DELIVERY_PAGE = 10
+
 /** One read → transform → write cycle. */
 function TraceGroup({ traceId, entries }: { traceId: string; entries: StageLogEntry[] }) {
+  const [shownDeliveries, setShownDeliveries] = useState(DELIVERY_PAGE)
+
   return (
     <Box sx={{ border: 1, borderColor: 'divider', borderRadius: 1, overflow: 'hidden' }}>
+      {/* One line. The id, what the cycle did, and how long it took are one fact about one
+          cycle, and splitting them across two rows made a four-row cycle six rows tall. */}
       <Stack
         direction="row"
-        alignItems="center"
-        spacing={1}
+        alignItems="baseline"
+        spacing={2}
         sx={{ px: 1.5, py: 0.75, bgcolor: 'action.hover' }}
       >
         <CopyableTrace traceId={traceId} entries={entries} />
-        <Typography variant="caption" sx={{ color: muted }}>
-          {entries.length} stage{entries.length === 1 ? '' : 's'} ·{' '}
+        <CycleSummary entries={entries} />
+        <Box sx={{ flex: 1 }} />
+        <Typography variant="caption" sx={{ ...tabular, color: muted }}>
           {entries.reduce((total, entry) => total + entry.durationMs, 0)} ms
         </Typography>
       </Stack>
 
-      <CycleSummary entries={entries} />
-
       {(() => {
         const { head, deliveries } = splitIntoDeliveries(entries)
+        const visible = deliveries.slice(0, shownDeliveries)
         return (
           <>
             {head.map((entry) => (
               <StageRow key={entry.position} entry={entry} />
             ))}
-            {deliveries.map((delivery, index) => (
-              <Box key={delivery[0]!.position}>
-                {/* One heading per delivery, because the flat list could not say which batch
-                    transform belonged to which call — and with a script that throws on one group
-                    and not the next, that is the only thing worth knowing. */}
-                {deliveries.length > 1 && (
-                  <Typography
-                    variant="caption"
-                    sx={{ display: 'block', px: 1.5, py: 0.5, color: muted, borderTop: 1,
-                          borderColor: 'divider', bgcolor: 'action.hover' }}
-                  >
-                    delivery {index + 1} of {deliveries.length}
-                  </Typography>
-                )}
+            {visible.map((delivery, index) => (
+              // One block: a tint and a single border down its whole height. Drawing the rule per
+              // row left disconnected stubs with gaps at every row boundary, and the heading
+              // floated free of them. A block cannot come apart, and needs no indent — so nothing
+              // looks nested under the transform above it either.
+              <Box
+                key={delivery[0]!.position}
+                sx={{
+                  bgcolor: 'action.hover',
+                  borderLeft: 2,
+                  borderColor: 'primary.main',
+                  borderTop: 1,
+                  borderTopColor: 'divider',
+                }}
+              >
+                {/* Inside the block, aligned with the stage names beneath it. */}
+                <Typography
+                  variant="caption"
+                  sx={{ display: 'block', pl: 1.5, pt: 0.5, color: 'primary.main',
+                        fontWeight: 700, letterSpacing: 0.3 }}
+                >
+                  delivery{deliveries.length > 1 ? ` ${index + 1} of ${deliveries.length}` : ''}
+                </Typography>
                 {delivery.map((entry) => (
                   <StageRow key={entry.position} entry={entry} />
                 ))}
               </Box>
             ))}
+
+            {/* A cycle delivering one record per call has as many deliveries as it has records.
+                Rendering them all put tens of thousands of rows inside one collapsed group and
+                made the page unusable before anybody had asked to see them. */}
+            {deliveries.length > visible.length && (
+              <Stack alignItems="center" sx={{ py: 0.75, borderTop: 1, borderColor: 'divider' }}>
+                <Button
+                  size="small"
+                  onClick={() => setShownDeliveries((shown) => shown + DELIVERY_PAGE)}
+                >
+                  Show {Math.min(DELIVERY_PAGE, deliveries.length - visible.length)} more of{' '}
+                  {deliveries.length.toLocaleString()} deliveries
+                </Button>
+              </Stack>
+            )}
           </>
         )
       })()}
@@ -160,49 +213,53 @@ function TraceGroup({ traceId, entries }: { traceId: string; entries: StageLogEn
  * So the visible id is the cycle and the copied one is the log's.
  */
 function CopyableTrace({ traceId, entries }: { traceId: string; entries: StageLogEntry[] }) {
-  const first = entries[0]
-
-  return (
-    <Stack direction="row" spacing={2} alignItems="baseline" flexWrap="wrap" useFlexGap>
-      {/* Both, labelled, because they are different things and one raw hex string said neither.
-          chunkId is the key every store agrees on — the stage log, the record index, and the
-          application log line all carry it. traceId is finer: which read-transform-write cycle
-          within the chunk, and what the records that travelled in it are stamped with. */}
-      {first?.chunkId && <Labelled name="chunkId" value={first.chunkId} />}
-      <Labelled name="traceId" value={traceId} />
-    </Stack>
-  )
-}
-
-/** A named id, shown in full and copied whole. */
-function Labelled({ name, value }: { name: string; value: string }) {
   const [copied, setCopied] = useState(false)
+  const first = entries[0]
+  const chunkId = first?.chunkId
+  const cycle = traceId.split('#')[1]
 
+  // Both ids in full was eighty characters of hex for one fact — and the second is the first with
+  // a suffix, so most of it was the same string twice. The short form is what a person reads; the
+  // whole id is what they need on the clipboard, and both are one click apart.
   return (
-    <Stack direction="row" spacing={0.5} alignItems="baseline">
-      <Typography variant="caption" sx={{ color: muted }}>
-        {name}=
-      </Typography>
-      <Tooltip title={copied ? 'Copied' : 'Click to copy'}>
-        <Typography
-          variant="caption"
-          onClick={() => {
-            void navigator.clipboard.writeText(value)
-            setCopied(true)
-            window.setTimeout(() => setCopied(false), 1500)
-          }}
-          sx={{
-            ...tabular,
-            fontWeight: 600,
-            cursor: 'pointer',
-            color: copied ? 'success.main' : 'inherit',
-            '&:hover': { color: 'primary.main' },
-          }}
-        >
-          {value}
+    <Tooltip
+      title={
+        copied
+          ? 'Copied'
+          : chunkId
+            ? `Click to copy the chunk id ${chunkId} — application logs, the record index and this
+               timeline all carry it`
+            : traceId
+      }
+    >
+      <Stack
+        direction="row"
+        spacing={1}
+        alignItems="baseline"
+        onClick={() => {
+          void navigator.clipboard.writeText(chunkId ?? traceId)
+          setCopied(true)
+          window.setTimeout(() => setCopied(false), 1500)
+        }}
+        sx={{ cursor: 'pointer', '&:hover .id': { color: 'primary.main' } }}
+      >
+        <Typography variant="caption" sx={{ color: muted }}>
+          chunk
         </Typography>
-      </Tooltip>
-    </Stack>
+        <Typography
+          className="id"
+          variant="caption"
+          sx={{ ...tabular, fontWeight: 700, color: copied ? 'success.main' : 'inherit' }}
+        >
+          {chunkId ? shortId(chunkId) : traceId}
+        </Typography>
+        {cycle !== undefined && (
+          <Typography variant="caption" sx={{ color: muted }}>
+            · cycle {cycle}
+          </Typography>
+        )}
+      </Stack>
+    </Tooltip>
   )
 }
 
@@ -215,8 +272,9 @@ function Labelled({ name, value }: { name: string; value: string }) {
  * meant adding rows up by eye, and getting it wrong in the direction of thinking the sink received
  * half of what it did.
  *
- * <p>Silent when the numbers cannot mislead: a cycle with one write and no transform says the same
- * thing on its only row.
+ * <p>Shown for every cycle that delivered anything. It was suppressed for simple ones while it
+ * cost a row of its own; inline in the heading it costs nothing, and a total is worth having even
+ * when a single row happens to carry the same number.
  */
 function CycleSummary({ entries }: { entries: StageLogEntry[] }) {
   const reads = entries.filter((e) => e.stage === 'READ')
@@ -235,17 +293,8 @@ function CycleSummary({ entries }: { entries: StageLogEntry[] }) {
   const kept = writes.reduce((total, e) => total + e.recordsOut, 0)
   const refused = handed - kept
 
-  // A single write and no transform is already fully described by its own row.
-  if (transforms.length === 0 && writes.length <= 1 && refused === 0) {
-    return null
-  }
-
   return (
-    <Typography
-      variant="caption"
-      sx={{ display: 'block', px: 1.5, py: 0.5, color: muted, borderTop: 1,
-            borderColor: 'divider', ...tabular }}
-    >
+    <Typography variant="caption" sx={{ fontWeight: 600, ...tabular }}>
       {read.toLocaleString()} read
       {transforms.length > 0 && offered !== read && (
         <> → {offered.toLocaleString()} after transforms</>
@@ -278,6 +327,29 @@ function CycleSummary({ entries }: { entries: StageLogEntry[] }) {
  * <p>A delivery opens at a batch transform, or at a write with no transform before it. It closes
  * at the write — or at a batch transform that failed, which ends that delivery without one.
  */
+/**
+ * An entry's details minus the fields the timeline set for itself.
+ *
+ * <p>{@code transformStage} is how the rows above were grouped, not something a destination said,
+ * and showing it under "what the destination reported" is worse than showing nothing: it is a
+ * plausible-looking field that came from us.
+ */
+function reportedDetails(entry: StageLogEntry): Record<string, unknown> | null {
+  if (!entry.details) {
+    return null
+  }
+  const { transformStage: _ignored, ...rest } = entry.details as Record<string, unknown>
+  return Object.keys(rest).length > 0 ? rest : null
+}
+
+/** Whether an entry is the pass over one delivery group, rather than over every record. */
+function isBatchTransform(entry: StageLogEntry): boolean {
+  return (
+    entry.stage === 'TRANSFORM' &&
+    (entry.details as { transformStage?: string } | null)?.transformStage === 'BATCH'
+  )
+}
+
 function splitIntoDeliveries(entries: StageLogEntry[]): {
   head: StageLogEntry[]
   deliveries: StageLogEntry[][]
@@ -287,11 +359,7 @@ function splitIntoDeliveries(entries: StageLogEntry[]): {
   let current: StageLogEntry[] | null = null
 
   for (const entry of entries) {
-    const batchTransform =
-      entry.stage === 'TRANSFORM' &&
-      (entry.details as { transformStage?: string } | null)?.transformStage === 'BATCH'
-
-    if (batchTransform) {
+    if (isBatchTransform(entry)) {
       current = [entry]
       deliveries.push(current)
       // A batch script that threw delivered nothing, so no write follows and this one is closed.
@@ -323,31 +391,43 @@ function splitIntoDeliveries(entries: StageLogEntry[]): {
 
 function StageRow({ entry }: { entry: StageLogEntry }) {
   const [open, setOpen] = useState(false)
+  // transformStage alone is not detail worth an expander — it is how the rows above were grouped.
+  const reportable = summarise(entry.details)
   const hasDetail =
-    Boolean(entry.query) || Boolean(entry.details) || Boolean(entry.request) ||
+    Boolean(entry.query) || Boolean(reportable) || Boolean(entry.request) ||
     Boolean(entry.response) || Boolean(entry.errorMessage)
 
   return (
     <Box sx={{ borderTop: 1, borderColor: 'divider' }}>
-      <Stack direction="row" alignItems="center" spacing={1.5} sx={{ px: 1.5, py: 1 }}>
-        <Chip
-          size="small"
-          label={entry.stage}
-          color={entry.outcome === 'FAILED' ? 'error' : STAGE_COLOUR[entry.stage]}
-          variant={entry.outcome === 'FAILED' ? 'filled' : 'outlined'}
-          sx={{ minWidth: 92, fontSize: 11 }}
-        />
+      <Stack direction="row" alignItems="center" spacing={1.5} sx={{ px: 1.5, py: 0.5 }}>
+        {/* The column is fixed so the rows line up; the pill inside it is not, so a short word
+            sits in a short pill instead of floating in the middle of a wide one. */}
+        <Box sx={{ width: 132, flexShrink: 0 }}>
+          <Chip
+            size="small"
+            // Both stages were labelled TRANSFORM, so the pass over every record and the pass over
+            // one delivery group looked identical — which is the distinction the grouping draws.
+            label={isBatchTransform(entry) ? 'BATCH TRANSFORM' : entry.stage}
+            color={entry.outcome === 'FAILED' ? 'error' : STAGE_COLOUR[entry.stage]}
+            variant={entry.outcome === 'FAILED' ? 'filled' : 'outlined'}
+            sx={{ fontSize: 10.5, height: 20 }}
+          />
+        </Box>
 
-        <Typography variant="body2" sx={{ minWidth: 150 }}>
+        <Typography variant="body2" sx={{ width: 190 }} noWrap>
           {entry.nodeName || entry.nodeId}
-
         </Typography>
 
-        <Typography variant="caption" sx={{ ...tabular, minWidth: 130 }}>
+        {/* Right-aligned, so counts and durations form columns down the cycle instead of
+            starting wherever the name before them happened to end. */}
+        <Typography variant="caption" sx={{ ...tabular, width: 150, textAlign: 'right' }}>
           <RecordCount entry={entry} />
         </Typography>
 
-        <Typography variant="caption" sx={{ ...tabular, color: muted, minWidth: 70 }}>
+        <Typography
+          variant="caption"
+          sx={{ ...tabular, color: muted, width: 64, textAlign: 'right' }}
+        >
           {entry.durationMs} ms
         </Typography>
 
@@ -356,7 +436,7 @@ function StageRow({ entry }: { entry: StageLogEntry }) {
             strings, and nothing said one had fetched column names and the other a thousand
             rows. The URL is still there, one click away. */}
         <Typography variant="caption" sx={{ ...tabular, color: muted, flex: 1 }} noWrap>
-          {entry.errorMessage ?? reasonOf(entry) ?? entry.query ?? summarise(entry.details)}
+          {entry.errorMessage ?? reasonOf(entry) ?? entry.query ?? reportable}
         </Typography>
 
         {hasDetail && (
@@ -380,7 +460,8 @@ function StageRow({ entry }: { entry: StageLogEntry }) {
           <Detail label="Query" value={entry.query} />
           <Detail label="Cursor before" value={entry.cursorIn} />
           <Detail label="Cursor after" value={entry.cursorOut} />
-          <Detail label="What the destination reported" value={entry.details} />
+          {/* The connector's report, without this component's own grouping hint in it. */}
+          <Detail label="What the destination reported" value={reportedDetails(entry)} />
           {/* No "Sent" row. It held the whole batch — the records themselves — which are in the
               record index, one document each, searchable by any field they contain. Here they were
               one unsearchable blob per call, usually truncated, and they crowded out the small
@@ -403,8 +484,10 @@ function RecordCount({ entry }: { entry: StageLogEntry }) {
   // Any stage where the two differ, not only a transform. A write whose destination refused a
   // third of the batch was showing the batch size — true about the request, wrong about the
   // outcome, and silent about which it meant.
+  // The word "records" on every row of every cycle is a column of the same eight characters. The
+  // number is what varies, and an arrow is what says it changed.
   if (entry.recordsIn === entry.recordsOut) {
-    return <>{entry.recordsIn.toLocaleString()} records</>
+    return <>{entry.recordsIn.toLocaleString()}</>
   }
   const delta = entry.recordsOut - entry.recordsIn
   const lost =
@@ -504,6 +587,9 @@ function summarise(details: Record<string, unknown> | null): string {
     return ''
   }
   return Object.entries(details)
+    // Internal to how this component groups rows, and it was being rendered as the row's message:
+    // "transformStage=RECORD" where the reader expects what the stage actually did.
+    .filter(([name]) => name !== 'transformStage')
     .map(([name, value]) => `${name}=${describe(value)}`)
     .join('  ')
 }

@@ -1,6 +1,13 @@
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  keepPreviousData,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import { api, query } from './client'
 import type {
+  ChunkSummary,
   AuditPolicy,
   Chunk,
   ChunkingPolicy,
@@ -17,6 +24,7 @@ import type {
   PipelineVersionSummary,
   RateLimit,
   RecordError,
+  Reconciliation,
   RecordSearchCriteria,
   RecordIndexEntry,
   StageLogEntry,
@@ -55,6 +63,7 @@ export const keys = {
   chunks: (runId: string) => ['chunks', runId] as const,
   runErrors: (runId: string) => ['run-errors', runId] as const,
   errorGroups: (runId: string) => ['run-error-groups', runId] as const,
+  reconciliation: (runId: string) => ['run-reconciliation', runId] as const,
 }
 
 /** How often a live view refetches. Fast enough to feel live, slow enough not to hammer the API. */
@@ -379,10 +388,48 @@ export function useRun(id: string | undefined) {
   })
 }
 
+/**
+ * A run's chunks, a page at a time.
+ *
+ * <p>It used to fetch every chunk of the run to draw the fifty rows that fit on the screen — a
+ * hundred thousand documents and as many DTOs for a run that size, repeated on every live refresh.
+ * The count still comes back with the first page, so the tab can say how many there are without
+ * holding them.
+ */
 export function useChunks(runId: string | undefined, live: boolean) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: keys.chunks(runId!),
-    queryFn: () => api.get<Chunk[]>(`/api/v1/runs/${runId}/chunks`),
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) =>
+      api.get<Page<Chunk>>(`/api/v1/runs/${runId}/chunks${query({ page: pageParam, size: 10 })}`),
+    getNextPageParam: (last) => (last.hasNext ? last.page + 1 : undefined),
+    enabled: Boolean(runId),
+    // Only the pages already loaded are refreshed; scrolling further still asks for the rest.
+    refetchInterval: live ? LIVE_REFRESH_MS : false,
+  })
+}
+
+/** The few numbers the retry banner needs, without the chunks behind them. */
+export function useChunkSummary(runId: string | undefined, live: boolean) {
+  return useQuery({
+    queryKey: ['chunk-summary', runId],
+    queryFn: () => api.get<ChunkSummary>(`/api/v1/runs/${runId}/chunk-summary`),
+    enabled: Boolean(runId),
+    refetchInterval: live ? LIVE_REFRESH_MS : false,
+  })
+}
+
+/**
+ * A run's balance sheet.
+ *
+ * Kept polling while the run is live so the tab is not stale when it finishes, but the server
+ * withholds a verdict until then — a mid-run figure is arithmetic about a moving target, and the
+ * number somebody remembers is the first one they read.
+ */
+export function useReconciliation(runId: string | undefined, live: boolean) {
+  return useQuery({
+    queryKey: keys.reconciliation(runId!),
+    queryFn: () => api.get<Reconciliation>(`/api/v1/runs/${runId}/reconciliation`),
     enabled: Boolean(runId),
     refetchInterval: live ? LIVE_REFRESH_MS : false,
   })
@@ -641,13 +688,30 @@ export function useRunRecords(runId: string, outcome?: string) {
  * gets compared against write time). Empty when the pipeline does not log its stages, which the
  * page has to state as "not switched on" rather than as "nothing happened".
  */
+/**
+ * A run's stages, a page at a time.
+ *
+ * <p>Infinite rather than a single large fetch, because the number of entries is a property of the
+ * data and not of the screen: a run delivering one record per call writes four entries per record,
+ * so a modest migration produces hundreds of thousands. The previous version asked for two hundred
+ * and told the reader the rest existed somewhere they could not reach.
+ *
+ * <p>Fifty entries a page, which is about ten cycles of an ordinary pipeline — so one scroll is one
+ * request rather than one request feeding several scrolls. Only about: the server pages by entry,
+ * because an entry is what it stores, and a cycle is four entries or four hundred depending on how
+ * the batch was delivered. Paging by cycle would need the server to group before it pages.
+ */
 export function useRunStages(runId: string, chunkId?: string, stage?: string) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: ['run-stages', runId, chunkId, stage],
-    queryFn: () =>
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) =>
       api.get<Page<StageLogEntry>>(
-        `/api/v1/stages/by-run${query({ runId, chunkId, stage, size: 200 })}`,
+        `/api/v1/stages/by-run${query({ runId, chunkId, stage, page: pageParam, size: 50 })}`,
       ),
+    // The server says whether more exists; deriving it from a short page would stop early on a
+    // page that happens to be exactly full.
+    getNextPageParam: (last) => (last.hasNext ? last.page + 1 : undefined),
     enabled: Boolean(runId),
   })
 }

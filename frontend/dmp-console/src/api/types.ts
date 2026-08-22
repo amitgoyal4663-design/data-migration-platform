@@ -112,6 +112,70 @@ export interface ChunkingPolicy {
   checkpointEveryNBatches: number
 }
 
+/**
+ * A run's chunks counted by state, without holding the chunks.
+ *
+ * Answers "can this be retried, and what would it re-send" in a few numbers. The console used to
+ * derive these by fetching every chunk of the run.
+ */
+export interface ChunkSummary {
+  byState: Record<string, number>
+  /** Failed or abandoned. */
+  failed: number
+  /** Never finished: cancelled, pending, running, or parked on a destination that answers later. */
+  unfinished: number
+  /** Already written by chunks that did not finish, and so what a retry would deliver twice. */
+  recordsAtRisk: number
+}
+
+/** How a reconciliation row should be read. The server decides; the console only styles. */
+export type ReconciliationKind =
+  | 'TOTAL'
+  | 'DEDUCTION'
+  | 'SUBTOTAL'
+  | 'RESULT'
+  | 'PENDING'
+  | 'BALANCE'
+
+export interface ReconciliationLine {
+  label: string
+  count: number
+  kind: ReconciliationKind
+  note: string
+}
+
+/** One comparison between the run's own counters and the record index. */
+export interface ReconciliationCheck {
+  label: string
+  /** What the run's counters say. */
+  expected: number
+  /** What the index says. */
+  actual: number
+  difference: number
+  passed: boolean
+  note: string
+}
+
+/**
+ * A run's balance sheet — what a migration is signed off with.
+ *
+ * The sheet is rendered without the console knowing what any line means, so adding a line on the
+ * server never needs a change here.
+ */
+export interface Reconciliation {
+  verdict: 'BALANCED' | 'DISCREPANCY' | 'INCOMPLETE'
+  sheet: ReconciliationLine[]
+  /** Empty when the pipeline does not index records, so there is nothing to check against. */
+  checks: ReconciliationCheck[]
+  byOutcome: Record<string, number>
+  indexedTotal: number
+  indexed: boolean
+  complete: boolean
+  runId: string
+  pipelineName: string
+  generatedAt: string
+}
+
 /** 0 = unlimited, 1 = strictly sequential, N = exactly N chunks in flight across the fleet. */
 export interface ExecutionPolicy {
   maxConcurrentChunks: number

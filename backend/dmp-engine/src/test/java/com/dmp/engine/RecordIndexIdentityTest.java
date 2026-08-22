@@ -333,6 +333,12 @@ class RecordIndexIdentityTest {
         }
 
         @Override
+        public java.util.Map<String, Long> countByOutcome(TenantId tenantId, RunId runId) {
+            return entries.stream().collect(java.util.stream.Collectors.groupingBy(
+                    entry -> entry.outcome().name(), java.util.stream.Collectors.counting()));
+        }
+
+        @Override
         public boolean supportsContentSearch() {
             return false;
         }

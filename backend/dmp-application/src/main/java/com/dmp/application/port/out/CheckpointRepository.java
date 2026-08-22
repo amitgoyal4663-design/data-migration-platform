@@ -33,6 +33,15 @@ public interface CheckpointRepository {
     List<Checkpoint> findByRun(TenantId tenantId, RunId runId);
 
     /**
+     * The checkpoints of exactly these chunks.
+     *
+     * <p>For a screen showing a page of chunks. {@link #findByRun} loads the run's whole
+     * collection, which is the right answer when the engine asks how far a run has got and the
+     * wrong one when a console wants to annotate fifty rows.
+     */
+    List<Checkpoint> findBySplits(TenantId tenantId, List<SplitId> splitIds);
+
+    /**
      * Returns the stored checkpoint, or a fresh one if the split has never committed a batch.
      *
      * <p>The call a worker makes when starting or resuming a split, so that resuming and starting
