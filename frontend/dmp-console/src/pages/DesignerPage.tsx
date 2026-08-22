@@ -77,6 +77,18 @@ import { useThemeMode } from '@/store'
  */
 const PALETTE: { type: NodeType; label: string; hint: string }[] = [
   { type: 'SOURCE', label: 'Source', hint: 'Where data is read from' },
+  // Before the script steps, deliberately. These cover what most pipelines actually need, and a
+  // palette that leads with JavaScript teaches everybody to write JavaScript.
+  {
+    type: 'MAPPER',
+    label: 'Map fields',
+    hint: 'Rename and convert fields from a list — no code. Reads a real record to start from',
+  },
+  {
+    type: 'VALIDATION',
+    label: 'Validate',
+    hint: 'Named rules. The name becomes the heading in the failure report',
+  },
   { type: 'TRANSFORM', label: 'Transform', hint: 'JavaScript on each record — map, filter, split' },
   {
     type: 'BATCH_TRANSFORM',
@@ -828,6 +840,16 @@ function starterConfig(type: NodeType): Record<string, unknown> {
   }
   if (type === 'BATCH_TRANSFORM') {
     return { script: STARTER_SCRIPTS.BATCH }
+  }
+  // Empty but present, so the editors render their own "nothing configured yet" state rather than
+  // reading fields off an absent object. Both are refused at publish time until filled in — a
+  // mapper that maps nothing would send empty records, and a validation with no rules is a step
+  // that silently does nothing.
+  if (type === 'MAPPER') {
+    return { mappings: [], keepUnmapped: false }
+  }
+  if (type === 'VALIDATION') {
+    return { rules: [], onFail: 'REJECT' }
   }
   return {}
 }

@@ -336,6 +336,7 @@ public class PipelineVersionService {
         issues.addAll(validateConnectorReferences(tenantId, version.definition()));
 
         issues.addAll(validateRecordIdentity(tenantId, version));
+        issues.addAll(validateConfiguredSteps(version.definition()));
         issues.addAll(validateSizes(version));
         issues.addAll(validateDelivery(tenantId, version));
 
@@ -410,6 +411,40 @@ public class PipelineVersionService {
      * <p>The executor clamps these anyway, so nothing here changes what a run does. The point is to
      * say so at publish time, while somebody is looking at the field they got wrong.
      */
+    /**
+     * Steps that were placed on the canvas and never filled in.
+     *
+     * <p>Caught here rather than when a run resolves, because the engine's refusal arrives after
+     * the version is published, after the run is created, on a worker — and by then the pipeline
+     * looks correct to everybody who approved it. An empty mapper would send empty records; an
+     * empty validation is a step that silently does nothing, which is worse than no step because
+     * the canvas says the records were checked.
+     */
+    private List<ValidationIssue> validateConfiguredSteps(PipelineDefinition definition) {
+        List<ValidationIssue> issues = new ArrayList<>();
+
+        for (NodeDefinition node : definition.nodesOfType(NodeType.MAPPER)) {
+            if (!node.config().path("mappings").isArray()
+                    || node.config().path("mappings").isEmpty()) {
+                issues.add(new ValidationIssue(ValidationIssue.Severity.ERROR, "MAPPER_EMPTY",
+                        "'" + node.name() + "' maps no fields, so it would hand an empty record to "
+                                + "the next step. Add at least one mapping, or remove the step.",
+                        node.id(), null));
+            }
+        }
+
+        for (NodeDefinition node : definition.nodesOfType(NodeType.VALIDATION)) {
+            if (!node.config().path("rules").isArray() || node.config().path("rules").isEmpty()) {
+                issues.add(new ValidationIssue(ValidationIssue.Severity.ERROR, "VALIDATION_EMPTY",
+                        "'" + node.name() + "' has no rules, so every record passes it unchecked. "
+                                + "Add a rule, or remove the step — a validation that checks "
+                                + "nothing is worse than none, because the canvas says otherwise.",
+                        node.id(), null));
+            }
+        }
+        return issues;
+    }
+
     private List<ValidationIssue> validateSizes(PipelineVersion version) {
         ChunkingPolicy chunking = version.chunkingPolicy();
         int rowsPerChunk = version.executionPolicy()
