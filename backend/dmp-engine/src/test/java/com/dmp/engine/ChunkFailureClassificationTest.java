@@ -56,6 +56,27 @@ class ChunkFailureClassificationTest {
     }
 
     @Test
+    @DisplayName("a platform failure is asked for its own verdict rather than assumed transient")
+    void platformFailuresFollowTheirErrorCode() {
+        // Found by running one: a chunk needing 167 calls against a limit of 5 was attempted five
+        // times before being abandoned. No amount of retrying makes 167 fit into 5, and each
+        // attempt pushed the message that says exactly what to change further up the log.
+        var impossible = new com.dmp.common.error.DmpException(
+                com.dmp.common.error.ErrorCode.VALIDATION_FAILED,
+                "A chunk of 167 call(s) cannot be sent under this connector's rate limit");
+
+        assertThat(WorkerLoop.isRetryable(impossible)).isFalse();
+        assertThat(WorkerLoop.errorCodeFor(impossible)).isEqualTo("VALIDATION_FAILED");
+
+        // The flag is the error code's to decide, not this method's. A contended row really is
+        // worth another attempt, and the same switch arm has to reach the opposite conclusion.
+        var contended = new com.dmp.common.error.DmpException(
+                com.dmp.common.error.ErrorCode.CONCURRENT_MODIFICATION, "someone else got there first");
+
+        assertThat(WorkerLoop.isRetryable(contended)).isTrue();
+    }
+
+    @Test
     @DisplayName("an unclassified failure gets another attempt")
     void unknownFailuresAreRetried() {
         // The safer default of the two: a wasted attempt costs one chunk's work, while wrongly

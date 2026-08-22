@@ -84,7 +84,9 @@ public class OpenSearchRecordIndex implements RecordIndexPort {
                 "errorCode":  { "type": "keyword" },
                 "occurredAt": { "type": "date" },
                 "expiresAt":  { "type": "date" },
-                "record":     { "type": "flat_object" }
+                "record":     { "type": "flat_object" },
+                "sourceRecord": { "type": "flat_object" },
+                "errorMessage": { "type": "text" }
               }
             }
             """;
@@ -261,13 +263,25 @@ public class OpenSearchRecordIndex implements RecordIndexPort {
             filters.add(range);
         }
         if (notBlank(query.text())) {
-            // Against a named field when given one, otherwise across the whole record. The record
-            // is a flat_object, so `record.email` addresses one field of it without the mapping
-            // having had to know that field would exist.
+            // Across both ends of the pipeline, not only what was sent.
+            //
+            // A transform is free to remove a field, and a support desk is asked about the record
+            // as the customer knows it — an email address the mapping strips is exactly the value
+            // somebody will type. Searching only `record` finds what the destination received and
+            // silently cannot find what the source produced, which is the same misleading empty
+            // answer this screen exists to avoid. Both are flat_object, so `record.email` addresses
+            // one field of either without the mapping having had to know that field would exist.
             ObjectNode match = Json.newObject();
-            match.putObject("query_string")
-                    .put("query", query.text())
-                    .put("default_field", notBlank(query.field()) ? "record." + query.field() : "record.*");
+            ObjectNode queryString = match.putObject("query_string").put("query", query.text());
+
+            com.fasterxml.jackson.databind.node.ArrayNode fields = queryString.putArray("fields");
+            if (notBlank(query.field())) {
+                fields.add("record." + query.field());
+                fields.add("sourceRecord." + query.field());
+            } else {
+                fields.add("record.*");
+                fields.add("sourceRecord.*");
+            }
             filters.add(match);
         }
 
@@ -317,6 +331,9 @@ public class OpenSearchRecordIndex implements RecordIndexPort {
                     Outcome.valueOf(source.path("outcome").asText()),
                     source.path("errorCode").isNull() ? null : source.path("errorCode").asText(null),
                     source.has("record") ? source.get("record") : null,
+                    source.has("sourceRecord") ? source.get("sourceRecord") : null,
+                    source.path("errorMessage").isNull() ? null
+                            : source.path("errorMessage").asText(null),
                     java.time.Instant.parse(source.path("occurredAt").asText()),
                     java.time.Instant.parse(source.path("expiresAt").asText())));
         }
@@ -336,6 +353,7 @@ public class OpenSearchRecordIndex implements RecordIndexPort {
         document.put("recordKey", entry.recordKey());
         document.put("outcome", entry.outcome().name());
         document.put("errorCode", entry.errorCode());
+        document.put("errorMessage", entry.errorMessage());
         document.put("occurredAt", entry.occurredAt().toString());
         document.put("expiresAt", entry.expiresAt().toString());
 
@@ -343,6 +361,11 @@ public class OpenSearchRecordIndex implements RecordIndexPort {
         // the platform's own and corrupt what a search means.
         if (entry.payload() != null) {
             document.set("record", entry.payload());
+        }
+        // Only when a transform actually changed something. An identical copy beside every record
+        // would double the index to say nothing.
+        if (entry.sourcePayload() != null && !entry.sourcePayload().equals(entry.payload())) {
+            document.set("sourceRecord", entry.sourcePayload());
         }
         return document.toString();
     }

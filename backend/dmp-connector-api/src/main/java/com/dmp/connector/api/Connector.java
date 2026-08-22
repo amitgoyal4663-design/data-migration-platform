@@ -29,4 +29,5 @@ public interface Connector {
         throw new ConnectorException(ConnectorException.Kind.CONFIGURATION,
                 "Connector '" + spec().type() + "' does not support connection testing");
     }
+
 }

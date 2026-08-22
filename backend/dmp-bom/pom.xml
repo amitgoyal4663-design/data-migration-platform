@@ -95,6 +95,11 @@
             </dependency>
             <dependency>
                 <groupId>com.dmp</groupId>
+                <artifactId>dmp-ratelimit-redis</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.dmp</groupId>
                 <artifactId>dmp-events-kafka</artifactId>
                 <version>${project.version}</version>
             </dependency>

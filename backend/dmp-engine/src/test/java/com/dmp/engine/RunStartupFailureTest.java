@@ -55,6 +55,24 @@ class RunStartupFailureTest {
 
     private static final Instant NOW = Instant.parse("2026-08-20T10:00:00Z");
 
+    /** Nothing here is rate limited, so every chunk is allowed and nothing is ever handed back. */
+    private static final com.dmp.application.port.out.RateLimiter GRANTS_EVERYTHING =
+            new com.dmp.application.port.out.RateLimiter() {
+                @Override
+                public Optional<Duration> tryAcquire(
+                        com.dmp.domain.connector.ConnectorInstanceId connector,
+                        com.dmp.domain.connector.RateLimitPolicy policy, long records, long calls) {
+                    return Optional.empty();
+                }
+
+                @Override
+                public void returnUnused(com.dmp.domain.connector.ConnectorInstanceId connector,
+                                         com.dmp.domain.connector.RateLimitPolicy policy,
+                                         long reservedRecords, long reservedCalls,
+                                         long usedRecords, long usedCalls) {
+                }
+            };
+
     @Mock private RunRepository runs;
     @Mock private SplitRepository splits;
     @Mock private CheckpointRepository checkpoints;
@@ -75,7 +93,9 @@ class RunStartupFailureTest {
                 PipelineMode.FULL_LOAD, RunTrigger.API, null, "tester", NOW);
 
         worker = new WorkerLoop(runs, splits, checkpoints, planner, orchestrator, executor, events,
-                externalJobs, Clock.fixed(NOW, ZoneOffset.UTC), "worker-1", 4,
+                externalJobs, GRANTS_EVERYTHING,
+                new com.dmp.connector.runtime.ConnectorRegistry("plugins"),
+                Clock.fixed(NOW, ZoneOffset.UTC), "worker-1", 4,
                 Duration.ofSeconds(5), Duration.ofMillis(200));
 
         when(runs.findByStates(any(), anyInt())).thenReturn(List.of(created));

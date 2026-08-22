@@ -2,6 +2,7 @@ package com.dmp.app.web.dto;
 
 import com.dmp.domain.connector.ConnectorDirection;
 import com.dmp.domain.connector.ConnectorInstance;
+import com.dmp.domain.connector.RateLimitPolicy;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotBlank;
@@ -9,12 +10,81 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
+import java.time.Duration;
 import java.time.Instant;
 
 /** Web contract for connector instances. */
 public final class ConnectorInstanceDtos {
 
     private ConnectorInstanceDtos() {
+    }
+
+    /**
+     * What the far end has agreed to accept, in the words the client used.
+     *
+     * <p>Windows travel as ISO-8601 durations — {@code PT5M}, {@code PT1H}, {@code P1D} — rather
+     * than as a number plus a unit, because a number plus a unit is two fields that can disagree
+     * and this is one fact. Both units are optional and absent means unlimited; a client who gave
+     * exactly one number is the common case, not the exception.
+     */
+    @Schema(name = "RateLimit",
+            description = "Records and/or calls the destination allows per period. Omit either "
+                    + "for no limit on that unit. The budget belongs to this connector instance, "
+                    + "so every pipeline using it draws on the same one.")
+    public record RateLimit(
+            @Schema(example = "10000") Long records,
+            @Schema(description = "ISO-8601 period", example = "PT5M") String recordsWindow,
+            @Schema(example = "100") Long calls,
+            @Schema(description = "ISO-8601 period", example = "PT1M") String callsWindow,
+
+            @Schema(description = "BURST spends a whole window at once then waits, which is what a "
+                    + "client whose counter resets on the clock expects. EVEN never exceeds the "
+                    + "limit in any window, sliding or not, and costs throughput in proportion to "
+                    + "how much of the window one call takes up. Defaults to BURST.",
+                    example = "BURST")
+            RateLimitPolicy.Pacing pacing) {
+
+        public static RateLimit from(RateLimitPolicy policy) {
+            if (policy == null || policy.isUnlimited()) {
+                return null;
+            }
+            return new RateLimit(
+                    policy.limitsRecords() ? policy.records() : null,
+                    policy.limitsRecords() ? policy.recordsWindow().toString() : null,
+                    policy.limitsCalls() ? policy.calls() : null,
+                    policy.limitsCalls() ? policy.callsWindow().toString() : null,
+                    policy.pacing());
+        }
+
+        public RateLimitPolicy toPolicy() {
+            return new RateLimitPolicy(
+                    records == null ? 0 : records, period(recordsWindow),
+                    calls == null ? 0 : calls, period(callsWindow),
+                    pacing == null ? RateLimitPolicy.Pacing.BURST : pacing);
+        }
+
+        /**
+         * A malformed period is reported as a validation failure rather than as a server error,
+         * because it is one — somebody typed "5m" where "PT5M" was wanted.
+         */
+        private static Duration period(String text) {
+            if (text == null || text.isBlank()) {
+                return null;
+            }
+            try {
+                return Duration.parse(text.strip());
+            } catch (java.time.format.DateTimeParseException e) {
+                throw new com.dmp.common.error.DmpException(
+                        com.dmp.common.error.ErrorCode.VALIDATION_FAILED,
+                        "'" + text + "' is not a period. Write it as ISO-8601: PT30S, PT5M, PT1H, P1D.",
+                        java.util.Map.of("value", text));
+            }
+        }
+
+        /** Null when nothing was sent, so "no limit" and "leave it alone" are the same request. */
+        public static RateLimitPolicy policyOf(RateLimit sent) {
+            return sent == null ? RateLimitPolicy.NONE : sent.toPolicy();
+        }
     }
 
     @Schema(name = "ConnectorInstanceResponse")
@@ -33,7 +103,9 @@ public final class ConnectorInstanceDtos {
             Instant lastTestedAt,
             String lastTestError,
             Instant createdAt,
-            Instant updatedAt) {
+            Instant updatedAt,
+            @Schema(description = "What the far end allows. Null when there is no agreed limit.")
+            RateLimit rateLimit) {
 
         public static Response from(ConnectorInstance instance) {
             return new Response(
@@ -48,7 +120,8 @@ public final class ConnectorInstanceDtos {
                     instance.lastTestedAt(),
                     instance.lastTestError(),
                     instance.createdAt(),
-                    instance.updatedAt());
+                    instance.updatedAt(),
+                    RateLimit.from(instance.rateLimit()));
         }
     }
 
@@ -72,7 +145,9 @@ public final class ConnectorInstanceDtos {
             @Schema(description = "Secret references only. Sending a secret value here would store it in plain text.")
             JsonNode secretRefs,
 
-            String description) {
+            String description,
+
+            RateLimit rateLimit) {
     }
 
     @Schema(name = "UpdateConnectorInstanceRequest",
@@ -93,6 +168,9 @@ public final class ConnectorInstanceDtos {
                     + "unchanged. The connector type itself is not editable — a different type has "
                     + "a different configuration shape, so that is a new connection rather than an "
                     + "edit to this one.")
-            ConnectorDirection direction) {
+            ConnectorDirection direction,
+
+            @Schema(description = "What the far end allows. Send null to remove the limit.")
+            RateLimit rateLimit) {
     }
 }

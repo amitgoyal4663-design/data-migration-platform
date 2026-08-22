@@ -112,11 +112,19 @@ public class ChunkExecutor {
     /**
      * Runs one chunk to completion.
      *
-     * @param cancelled polled between batches so a stop request drains cleanly at a checkpoint
-     *                  boundary rather than tearing a batch in half
+     * <p><b>A stop does not interrupt this.</b> Stopping a run stops it claiming further chunks; a
+     * chunk already executing finishes. The alternative was tried and abandoned: breaking at the
+     * nearest batch boundary left a chunk half done, and a half-done chunk is the one state nothing
+     * else in the platform recognises. Its counts describe part of a range, its destination results
+     * file covers records it did not finish sending, and a Salesforce job could be left mid-upload
+     * with nobody watching it. Every other consumer — retry, resume, the results download, the
+     * run's totals — is built on a chunk being a whole thing.
+     *
+     * <p>The cost is that Stop is not instant. Under a rate limit a chunk can take minutes, and the
+     * run stays in STOPPING until the chunk it was running finishes. That is the trade, taken
+     * deliberately: a stop that waits is easier to explain than a chunk that half happened.
      */
-    public ChunkResult execute(ResolvedPipeline pipeline, Split split, String workerId,
-                               java.util.function.BooleanSupplier cancelled) {
+    public ChunkResult execute(ResolvedPipeline pipeline, Split split, String workerId) {
 
         // A chunk carrying a remote job handle has already read everything it is going to read and
         // has already handed it over. It is here to be settled, not re-executed.
@@ -161,6 +169,9 @@ public class ChunkExecutor {
         long failed = 0;
         long bytes = 0;
         int batches = 0;
+        // Transform failures since the last saved checkpoint, as distinct from {@code failed},
+        // which runs for the whole chunk and is never reset.
+        long transformFailedSinceFlush = 0;
 
         // Cumulative for the whole chunk, seeded from the checkpoint so a resumed chunk judges
         // itself on everything it has ever done rather than on this attempt alone. The counters
@@ -176,6 +187,10 @@ public class ChunkExecutor {
                 ? pipeline.execution().effectiveRowsPerChunk(chunking.readFetchSizeOrDefault())
                 : Long.MAX_VALUE;
         long readThisChunk = checkpoint.recordsRead();
+        // Cleared with every batch, so it holds one batch's source payloads and no more.
+        Map<Long, com.fasterxml.jackson.databind.JsonNode> sourceBySeq = new HashMap<>();
+        boolean indexesPayloads = pipeline.audit().level().indexesEveryRecord()
+                && pipeline.audit().indexesPayloads();
         boolean sourceExhausted = true;
 
         // Where this chunk had already reached. A source counts what the current read has emitted,
@@ -207,8 +222,16 @@ public class ChunkExecutor {
             // a bulk API refusing more than 10,000 a request must not be handed 50,000 and find
             // out mid-migration — and the byte ceiling, which the batch builder applies as records
             // accumulate, because only the records know what they weigh.
+            //
+            // Two ways a chunk knows how big it is, and both belong here. An open-ended chunk is
+            // as big as the budget that will stop it. A planned one is as big as the connector
+            // counted at planning time — and passing 0 for those, as this did, threw that number
+            // away: a Databricks chunk of a thousand rows became two batches of five hundred
+            // because five hundred is what the REST sink happens to prefer, the delivery setting
+            // that was meant to split it had nothing left to split, and the log showed the source
+            // query twice for one call.
             ChunkingPolicy.EffectiveSizes effective = chunking.resolved(
-                    openEnded ? rowBudget : 0,
+                    openEnded ? rowBudget : split.plannedRows(),
                     sinkSession.capabilities().maxBatchSize(),
                     sinkSession.capabilities().preferredBatchSize());
 
@@ -251,6 +274,10 @@ public class ChunkExecutor {
                         new RecordBatch.Builder(effective.writeBatchSize(), effective.maxBatchBytes());
 
                 Instant lastFlush = clock.instant();
+                // Nanoseconds spent inside the source since the last flush, subtracted from the
+                // linger so it measures how long records have waited rather than how long they
+                // took to arrive.
+                long blockedInSourceNanos = 0;
                 Instant lastHeartbeat = clock.instant();
 
                 // Where the current window of reading began, and where the stream was when it did.
@@ -283,16 +310,31 @@ public class ChunkExecutor {
                         sourceExhausted = false;
                         break;
                     }
+                    Instant askedSource = clock.instant();
                     try {
                         record = stream.next();
                     } catch (RuntimeException e) {
                         // The read that failed is worth an entry of its own. Without one, a source
                         // that dies mid-chunk leaves only the chunk's own error, which says the
                         // migration stopped but not which query it stopped on.
+                        //
+                        // The calls first, and they are what actually names the fault: a connector
+                        // that retried twice and gave up reports three fetches, and the chunk's
+                        // single exception says none of that.
+                        stages.fetches(stream.drainFetches());
                         stages.failed(StageLogPort.Stage.READ, readWindowStart, rowsThisWindow,
                                 bytesThisWindow, e);
                         throw e;
                     }
+                    // Time the source spent producing nothing. The linger below is meant to answer
+                    // "records are waiting, send them rather than hold them", and measuring it from
+                    // the last flush counted the source's own latency as waiting: a connector that
+                    // blocked six seconds polling a warehouse returned its first record into an
+                    // interval that had already expired, and the engine wrote a batch of one
+                    // record — then another of nine hundred and ninety-nine. On a slow source that
+                    // is a stream of tiny writes to a destination that may charge per call.
+                    blockedInSourceNanos += Duration.between(askedSource, clock.instant()).toNanos();
+
                     if (record == null) {
                         break;
                     }
@@ -308,6 +350,14 @@ public class ChunkExecutor {
                     // time it was written.
                     Instant recordStageStarted = clock.instant();
                     TransformOutcome transformed = apply(transform, pipeline, split, record);
+
+                    // What the source produced, kept only until this batch is written and only
+                    // when payloads are indexed at all. Without it the index can say what was sent
+                    // and never what was read, which is precisely the comparison somebody makes
+                    // when they suspect a transform of being the problem.
+                    if (indexesPayloads && !transform.isIdentity() && !transformed.outputs().isEmpty()) {
+                        sourceBySeq.put(record.seq(), record.payload());
+                    }
                     // Accumulated across the cycle rather than logged per record: an entry per
                     // record would be the record index again, at the record index's cost, for a
                     // stage whose interesting number is how the count changed over a batch.
@@ -322,8 +372,21 @@ public class ChunkExecutor {
                         failed++;
                         producedTotal++;
                         failedTotal++;
+                        // Kept separately because the checkpoint is written per flush and this
+                        // counter is not reset there. Without it these never reached the saved
+                        // progress: a chunk that lost a hundred records to a broken script and a
+                        // hundred and thirty-three to the destination reported a hundred and
+                        // thirty-three failures against a produced count that included all two
+                        // hundred and thirty-three — a percentage computed from two different
+                        // populations, which is how the console came to show 19%.
+                        transformFailedSinceFlush++;
+                        indexUnsent(pipeline, split, stages, record, seqOffset,
+                                RecordIndexPort.Outcome.TRANSFORM_FAILED, "TRANSFORM_FAILED",
+                                transformed.failure());
                     } else if (transformed.outputs().isEmpty()) {
                         filtered++;
+                        indexUnsent(pipeline, split, stages, record, seqOffset,
+                                RecordIndexPort.Outcome.FILTERED, null, null);
                     } else {
                         produced += transformed.outputs().size();
                         producedTotal += transformed.outputs().size();
@@ -331,9 +394,15 @@ public class ChunkExecutor {
                     }
 
                     boolean lingerElapsed = Duration.between(lastFlush, clock.instant())
+                            .minusNanos(blockedInSourceNanos)
                             .compareTo(effective.flushInterval()) >= 0;
 
                     if (builder.isFull() || lingerElapsed) {
+                        // What the source was actually asked, before the window that collected it.
+                        // Drained here rather than per record because it is the batch boundary that
+                        // makes the two grains comparable: however many calls appear against one
+                        // read window is exactly the fact the window itself cannot state.
+                        stages.fetches(stream.drainFetches());
                         // The read window closes before the write opens, so the three stages sit
                         // in the log in the order they happened and their durations do not overlap.
                         stages.read(readWindowStart, readWindowCursor, stream.cursor(),
@@ -342,9 +411,11 @@ public class ChunkExecutor {
                                 bytesThisWindow, !transform.isIdentity());
 
                         BatchOutcome outcome = writeBatch(pipeline, split, sinkSession, builder,
-                                transform, verdictIsPending, seqOffset, stages);
+                                transform, verdictIsPending, seqOffset, stages, sourceBySeq);
+                        sourceBySeq.clear();
                         Sink.WriteResult result = outcome.result();
-                        pending.accumulate(read, produced, result.written(), result.failed(),
+                        pending.accumulate(read, produced, result.written(),
+                                result.failed() + transformFailedSinceFlush,
                                 filtered, bytes, stream.cursor(),
                                 Math.max(outcome.lastSeq(), pending.lastSeq()));
                         written += result.written();
@@ -352,10 +423,12 @@ public class ChunkExecutor {
                         failedTotal += result.failed();
                         batches++;
                         lastFlush = clock.instant();
+                        blockedInSourceNanos = 0;
                         read = 0;
                         produced = 0;
                         filtered = 0;
                         bytes = 0;
+                        transformFailedSinceFlush = 0;
 
                         // A new cycle: the next read, its transforms and its write share a fresh
                         // trace id, which is what makes the log group into one story per batch.
@@ -386,12 +459,6 @@ public class ChunkExecutor {
                         }
 
                         lastHeartbeat = heartbeatIfDue(pipeline, split, workerId, lastHeartbeat);
-
-                        if (cancelled.getAsBoolean()) {
-                            log.info("Chunk {} of run {} stopping at a checkpoint boundary on request",
-                                    split.index(), split.runId());
-                            break;
-                        }
                     }
                 }
 
@@ -399,6 +466,12 @@ public class ChunkExecutor {
                 // Also runs when the batch is empty but records were read, which happens when a
                 // filter dropped every record since the last flush — those drops still have to be
                 // counted and the cursor still has to advance past them.
+                // Drained unconditionally, unlike the read window below. A call that returned rows
+                // the chunk then skipped — a resumed chunk landing mid-result — still happened, was
+                // still paid for, and is exactly the call somebody wonders about when a resume
+                // looks slower than it should.
+                stages.fetches(stream.drainFetches());
+
                 if (rowsThisWindow > 0) {
                     // The tail of the reading, whether or not it produced a batch to write. A
                     // filter that dropped everything since the last flush still cost a read, and
@@ -411,17 +484,22 @@ public class ChunkExecutor {
 
                 if (!builder.isEmpty()) {
                     BatchOutcome outcome = writeBatch(pipeline, split, sinkSession, builder,
-                            transform, verdictIsPending, seqOffset, stages);
+                            transform, verdictIsPending, seqOffset, stages, sourceBySeq);
+                    sourceBySeq.clear();
                     Sink.WriteResult result = outcome.result();
-                    pending.accumulate(read, produced, result.written(), result.failed(), filtered,
+                    pending.accumulate(read, produced, result.written(),
+                            result.failed() + transformFailedSinceFlush, filtered,
                             bytes, stream.cursor(), Math.max(outcome.lastSeq(), pending.lastSeq()));
                     written += result.written();
                     failed += result.failed();
                     failedTotal += result.failed();
                     batches++;
-                } else if (read > 0) {
-                    pending.accumulate(read, produced, 0, 0, filtered, bytes,
-                            stream.cursor(), pending.lastSeq());
+                } else if (read > 0 || transformFailedSinceFlush > 0) {
+                    // Records that never formed a batch because a script threw on every one of
+                    // them. They still failed, and a chunk that saved no progress for them would
+                    // re-read and re-fail them on resume.
+                    pending.accumulate(read, produced, 0, transformFailedSinceFlush, filtered,
+                            bytes, stream.cursor(), pending.lastSeq());
                     batches++;
                 }
 
@@ -476,10 +554,26 @@ public class ChunkExecutor {
             }
         }
 
+        // A chunk that knows its own size must deliver it. Only a connector that counted at
+        // planning time sets this — a Databricks manifest, not a guessed key range — so a
+        // shortfall is not a soft signal: the source said a thousand rows and produced eight
+        // hundred, or none.
+        //
+        // Worth failing over rather than logging, because the failure it catches is invisible.
+        // A source that answers an empty result for a chunk that has rows reads nothing,
+        // transforms nothing, writes nothing, and completes: the run reports success, the chunk
+        // reports COMPLETED, and thirty-six thousand records are simply absent. That happened,
+        // and nothing anywhere said so. Retrying is the right response — the commonest cause is
+        // a source that was restarted, moved on, or briefly lost the query behind the chunk.
+        if (split.plannedRows() > 0 && checkpoint.recordsRead() != split.plannedRows()) {
+            throw new ChunkShortfallException(split.index(), split.plannedRows(),
+                    checkpoint.recordsRead());
+        }
+
         ChunkResult result = new ChunkResult(
                 checkpoint.recordsRead(), checkpoint.recordsProduced(), checkpoint.recordsWritten(),
                 checkpoint.recordsFailed(), checkpoint.recordsFiltered(), checkpoint.bytesRead(),
-                batches, sourceExhausted);
+                stages.sinkCalls, batches, sourceExhausted);
 
         if (result.unaccounted() != 0) {
             // Records that entered the sink stage and were neither written nor rejected have gone
@@ -510,7 +604,8 @@ public class ChunkExecutor {
     private BatchOutcome writeBatch(ResolvedPipeline pipeline, Split split,
                                     Sink.SinkSession sinkSession, RecordBatch.Builder builder,
                                     RecordTransform transform, boolean verdictIsPending,
-                                    long seqOffset, StageRecorder stages) {
+                                    long seqOffset, StageRecorder stages,
+                                     Map<Long, com.fasterxml.jackson.databind.JsonNode> sourceBySeq) {
         RecordBatch drained = builder.drain();
 
         // Taken from the batch as read, before any division. Groups reorder records, so the last
@@ -531,7 +626,7 @@ public class ChunkExecutor {
             // are written again — the at-least-once behaviour a partly-written batch has always
             // had, rather than a new failure mode introduced by dividing it.
             Sink.WriteResult result = writeGroup(pipeline, split, sinkSession, transform,
-                    RecordBatch.of(group), verdictIsPending, seqOffset, stages);
+                    RecordBatch.of(group), verdictIsPending, seqOffset, stages, sourceBySeq);
 
             written += result.written();
             failed += result.failed();
@@ -597,7 +692,8 @@ public class ChunkExecutor {
     private Sink.WriteResult writeGroup(ResolvedPipeline pipeline, Split split,
                                         Sink.SinkSession sinkSession, RecordTransform transform,
                                         RecordBatch group, boolean verdictIsPending,
-                                        long seqOffset, StageRecorder stages) {
+                                        long seqOffset, StageRecorder stages,
+                                        Map<Long, com.fasterxml.jackson.databind.JsonNode> sourceBySeq) {
         RecordBatch batch = group;
 
         // A batch script either rewrites the records or produces the payload the sink sends. It
@@ -644,6 +740,7 @@ public class ChunkExecutor {
         }
 
         Instant callStarted = clock.instant();
+        stages.sinkCalls++;
         Sink.WriteResult result;
         try {
             result = sinkSession.write(batch);
@@ -653,6 +750,12 @@ public class ChunkExecutor {
             // destination had objected to.
             stages.failed(StageLogPort.Stage.WRITE, callStarted, batch.size(),
                     batch.totalBytes(), e);
+            // And the records that were in it. Without this they get no index entry at all: the
+            // chunk fails, is retried, and in the meantime a search for any of the five hundred
+            // records in the failed call finds nothing — which reads as "never attempted" when the
+            // truth is "attempted, and the destination refused the whole call". That is the
+            // ordinary way a REST destination fails; only a handful answer record by record.
+            indexFailedCall(pipeline, split, batch, seqOffset, stages, sourceBySeq, e);
             throw e;
         }
         stages.write(callStarted, batch, result);
@@ -665,7 +768,7 @@ public class ChunkExecutor {
         // same guarantee the checkpoint itself has: if this throws, the chunk is retried and the
         // records are indexed on the next attempt, whereas indexing first would claim a record was
         // written whenever the process died between the two.
-        indexRecords(pipeline, split, batch, result, verdictIsPending, seqOffset, stages);
+        indexRecords(pipeline, split, batch, result, verdictIsPending, seqOffset, stages, sourceBySeq);
 
         return result;
     }
@@ -688,7 +791,8 @@ public class ChunkExecutor {
      */
     private void indexRecords(ResolvedPipeline pipeline, Split split, RecordBatch batch,
                               Sink.WriteResult result, boolean verdictIsPending, long seqOffset,
-                              StageRecorder stages) {
+                              StageRecorder stages,
+                              Map<Long, com.fasterxml.jackson.databind.JsonNode> sourceBySeq) {
 
         if (!pipeline.audit().level().indexesEveryRecord() || batch.isEmpty()) {
             return;
@@ -733,11 +837,139 @@ public class ChunkExecutor {
                                     Payloads.truncate(record.payload(), audit.maxPayloadBytes()),
                                     audit)
                             : null,
+                    withPayloads && sourceBySeq.get(record.seq()) != null
+                            ? Redaction.apply(
+                                    Payloads.truncate(sourceBySeq.get(record.seq()),
+                                            audit.maxPayloadBytes()),
+                                    audit)
+                            : null,
+                    failure == null ? null : failure.message(),
                     now,
                     expiresAt));
         }
 
         recordIndex.indexAll(entries);
+    }
+
+    /**
+     * Marks every record of a call the destination refused outright.
+     *
+     * <p>The ordinary shape of a failing destination: one status for the whole request, no verdict
+     * per record. Before this, those records were indexed nowhere — the exception unwound past
+     * {@link #indexRecords} — so a search for any of them returned nothing at all, and nothing is
+     * how the screen says "we never had this record".
+     *
+     * <p>Best-effort on purpose. The write has already failed and is about to be rethrown; if the
+     * index is unreachable too, the chunk's own failure is the one worth keeping. Throwing from
+     * here would replace a message naming the destination's status with one naming OpenSearch.
+     */
+    private void indexFailedCall(ResolvedPipeline pipeline, Split split, RecordBatch batch,
+                                 long seqOffset, StageRecorder stages,
+                                 Map<Long, com.fasterxml.jackson.databind.JsonNode> sourceBySeq,
+                                 RuntimeException failure) {
+
+        if (!pipeline.audit().level().indexesEveryRecord() || batch.isEmpty()) {
+            return;
+        }
+
+        AuditPolicy audit = pipeline.audit();
+        Instant now = clock.instant();
+        Instant expiresAt = now.plus(audit.indexRetention());
+        boolean withPayloads = audit.indexesPayloads();
+        String code = failure instanceof com.dmp.connector.api.ConnectorException connector
+                ? connector.kind().name()
+                : failure.getClass().getSimpleName();
+        // The same sentence the chunk will fail with, against each record that was in the call, so
+        // the answer is on the record rather than only on the chunk somebody has to find first.
+        String message = failure.getMessage();
+
+        List<RecordIndexPort.RecordIndexEntry> entries = new ArrayList<>(batch.size());
+        for (DataRecord record : batch.records()) {
+            entries.add(new RecordIndexPort.RecordIndexEntry(
+                    split.tenantId(),
+                    pipeline.version().pipelineId(),
+                    split.runId(),
+                    split.id(),
+                    stages.traceId(),
+                    seqOffset + record.seq(),
+                    record.ordinal(),
+                    record.key() == null || record.key().isBlank() ? null : record.key(),
+                    RecordIndexPort.Outcome.CALL_FAILED,
+                    code,
+                    withPayloads
+                            ? Redaction.apply(
+                                    Payloads.truncate(record.payload(), audit.maxPayloadBytes()),
+                                    audit)
+                            : null,
+                    withPayloads && sourceBySeq.get(record.seq()) != null
+                            ? Redaction.apply(
+                                    Payloads.truncate(sourceBySeq.get(record.seq()),
+                                            audit.maxPayloadBytes()),
+                                    audit)
+                            : null,
+                    message,
+                    now,
+                    expiresAt));
+        }
+
+        try {
+            recordIndex.indexAll(entries);
+        } catch (RuntimeException indexFailure) {
+            log.warn("Chunk {} of run {} could not record the {} record(s) in the call the "
+                            + "destination refused. They will have no index entry for this attempt.",
+                    split.index(), split.runId(), batch.size(), indexFailure);
+        }
+    }
+
+    /**
+     * Indexes a record that left the pipeline before the destination ever saw it.
+     *
+     * <p>Until this existed the index held only records that reached a sink, so a record dropped by
+     * a filter and a record that never existed were the same empty search result. That is the worst
+     * answer a support screen can give: "we have no evidence of this order" reads as "we never
+     * received it", when the truth may be "your transform excluded it" or "your script threw on
+     * it, and the reason is in the dead-letter queue".
+     *
+     * <p>Written one at a time rather than batched with the sink's entries, because these records
+     * never join a batch — that is precisely what makes them invisible. The volume is the volume of
+     * filtering, which is a property of the pipeline the user configured.
+     *
+     * <p>The payload obeys the same audit policy as everything else. A record you chose not to send
+     * is still customer data, and a search index is the worse place to leak into: it exists to be
+     * queried.
+     */
+    private void indexUnsent(ResolvedPipeline pipeline, Split split, StageRecorder stages,
+                             DataRecord record, long seqOffset,
+                             RecordIndexPort.Outcome outcome, String errorCode,
+                             String errorMessage) {
+
+        AuditPolicy audit = pipeline.audit();
+        if (!audit.level().indexesEveryRecord()) {
+            return;
+        }
+
+        Instant now = clock.instant();
+        recordIndex.indexAll(List.of(new RecordIndexPort.RecordIndexEntry(
+                split.tenantId(),
+                pipeline.version().pipelineId(),
+                split.runId(),
+                split.id(),
+                stages.traceId(),
+                seqOffset + record.seq(),
+                record.ordinal(),
+                record.key() == null || record.key().isBlank() ? null : record.key(),
+                outcome,
+                errorCode,
+                audit.indexesPayloads()
+                        ? Redaction.apply(
+                                Payloads.truncate(record.payload(), audit.maxPayloadBytes()), audit)
+                        : null,
+                // The record never reached a transform's output, so there is no "before" distinct
+                // from what is already stored above.
+                null,
+                errorMessage,
+                now,
+                now.plus(audit.indexRetention()))));
     }
 
     /**
@@ -759,7 +991,7 @@ public class ChunkExecutor {
             persistRecordErrors(pipeline, split, List.of(new Sink.RecordError(
                     record.seq(), record.key(), "TRANSFORM_FAILED", e.getMessage(),
                     record.payload())));
-            return new TransformOutcome(List.of(), true);
+            return new TransformOutcome(List.of(), true, e.getMessage());
         }
     }
 
@@ -770,7 +1002,11 @@ public class ChunkExecutor {
      * and counting them the same would let a broken transform look like a working filter. The flag
      * keeps them apart: a drop is {@code filtered}, a failure is {@code failed}.
      */
-    private record TransformOutcome(List<DataRecord> outputs, boolean rejected) {
+    private record TransformOutcome(List<DataRecord> outputs, boolean rejected, String failure) {
+
+        TransformOutcome(List<DataRecord> outputs, boolean rejected) {
+            this(outputs, rejected, null);
+        }
     }
 
     /**
@@ -996,6 +1232,20 @@ public class ChunkExecutor {
         private final Instant expiresAt;
 
         /**
+         * Requests actually made of the destination during this execution.
+         *
+         * <p>Counted even when the stage log is switched off, because this is not logging: a rate
+         * limit reserves a pessimistic number of calls before the chunk starts — one per record,
+         * where a split script makes the real count unknowable in advance — and hands back what was
+         * provably never used. Without a count there is nothing to hand back against.
+         *
+         * <p>A call that threw is still counted. We cannot tell a request that never left from one
+         * whose response was lost, and assuming it arrived is the direction that cannot exceed
+         * somebody's limit.
+         */
+        private long sinkCalls;
+
+        /**
          * Which read → transform → write cycle the chunk is on.
          *
          * <p>Part of the trace id, and therefore derived rather than generated: a retried chunk
@@ -1005,6 +1255,14 @@ public class ChunkExecutor {
          */
         private int cycle;
 
+        /**
+         * Every entry this chunk has written, in order, whatever stage it was.
+         *
+         * <p>The log's only reliable ordering. See {@code StageEntry#position}.
+         */
+        private int position;
+
+        private int fetches;
         private int reads;
         private int transformsRun;
         private int writes;
@@ -1042,16 +1300,85 @@ public class ChunkExecutor {
             return enabled && policy.writes();
         }
 
-        /** One window of reading, bounded by the batch it filled. */
+        /**
+         * The calls the source actually made, as the connector reported them.
+         *
+         * <p>Written before the read window that collected them, so the log reads in the order
+         * things happened: the calls, then the window they filled, then the write.
+         *
+         * <p>Each entry keeps the connector's own timing rather than being measured here. A fetch
+         * finished some time before it was drained, and dating it from the drain would attribute
+         * the whole read window to the last call in it.
+         */
+        void fetches(List<Source.Fetch> fetches) {
+            for (Source.Fetch fetch : fetches) {
+                // Narrated whatever the audit policy says. The stage log is a store somebody
+                // chose to switch on and pays for; this is the debug log, and a developer who has
+                // turned DEBUG on has already said what they want. Parameterised, so a disabled
+                // level costs the call and nothing else.
+                log.debug("FETCH {} — {} in {}ms, {} row(s){}",
+                        fetch.succeeded() ? "ok" : "FAILED",
+                        fetch.reason(), fetch.durationMillis(), fetch.rows(),
+                        fetch.succeeded() ? "" : ": " + fetch.errorCode() + " " + fetch.errorMessage());
+                if (fetch.describe() != null) {
+                    log.debug("      asked: {}", fetch.describe());
+                }
+                if (fetch.response() != null) {
+                    log.debug("      answered: {}", Payloads.abbreviate(fetch.response(), 2_000));
+                }
+            }
+            if (fetches.isEmpty() || !logsReads()) {
+                return;
+            }
+            for (Source.Fetch fetch : fetches) {
+                int rows = (int) Math.min(fetch.rows(), Integer.MAX_VALUE);
+                // Why the call was made, alongside what was called. A URL answers the second
+                // question and never the first, so two fetches against one chunk read as a
+                // mystery — a retry? a second page? — until something says "column names" and
+                // "result chunk 5".
+                com.fasterxml.jackson.databind.node.ObjectNode details =
+                        com.dmp.common.json.Json.newObject();
+                if (fetch.reason() != null && !fetch.reason().isBlank()) {
+                    details.put("reason", fetch.reason());
+                }
+                submit(StageLogPort.Stage.FETCH, pipeline.sourceNode().id(),
+                        pipeline.sourceNode().name(), pipeline.sourceInstance().connectorType(),
+                        this.fetches++, rows, rows, fetch.bytes(),
+                        fetch.durationMillis(),
+                        fetch.succeeded()
+                                ? StageLogPort.Outcome.OK
+                                : StageLogPort.Outcome.FAILED,
+                        fetch.errorCode(), fetch.errorMessage(), fetch.describe(),
+                        null, null, details.isEmpty() ? null : details,
+                        policy.capturesBodies() ? fetch.request() : null,
+                        policy.capturesBodies() ? fetch.response() : null);
+            }
+        }
+
+        /**
+         * One window of reading, bounded by the batch it filled.
+         *
+         * <p><b>Carries the query only when nothing else did.</b> A query describes a call, and a
+         * connector that reports its own calls has already put it on the FETCH those rows came
+         * from — repeating it here says a request was made when none was. That is not a
+         * theoretical tidiness: two read windows filled from a single call, each showing the same
+         * query, read as the query having run twice, and it was believed.
+         *
+         * <p>Kept for connectors that report no fetches, because for them this is the only place
+         * the query can appear, and losing it would take away the answer to the commonest question
+         * in any migration — <em>why did this move nothing?</em>
+         */
         void read(Instant startedAt, JsonNode cursorIn, JsonNode cursorOut, int rows, long bytes,
                   String query) {
+            log.debug("READ  {} row(s), {} byte(s), cursor {} -> {}",
+                    rows, bytes, cursorIn, cursorOut);
             if (!logsReads()) {
                 return;
             }
             submit(StageLogPort.Stage.READ, pipeline.sourceNode().id(),
                     pipeline.sourceNode().name(), pipeline.sourceInstance().connectorType(),
                     reads++, rows, rows, bytes, startedAt, StageLogPort.Outcome.OK, null, null,
-                    query, cursorIn, cursorOut, null, null, null);
+                    fetches > 0 ? null : query, cursorIn, cursorOut, null, null, null);
         }
 
         /**
@@ -1062,6 +1389,8 @@ public class ChunkExecutor {
          * nine still in flight — and nothing else names the stage that changed the number.
          */
         void transform(Instant startedAt, TransformStage stage, int in, int out, long bytes) {
+            log.debug("TRANSFORM ({}) {} -> {} record(s) through [{}]",
+                    stage, in, out, nodeNamesFor(stage));
             if (!logsTransforms()) {
                 return;
             }
@@ -1105,6 +1434,10 @@ public class ChunkExecutor {
          * ten came out in zero milliseconds is noise in a log read as a sequence.
          */
         void transformed(int in, int out, long elapsedNanos, long bytes, boolean hasRecordStage) {
+            if (hasRecordStage && in > 0) {
+                log.debug("TRANSFORM (RECORD) {} -> {} record(s) in {}ms through [{}]",
+                        in, out, elapsedNanos / 1_000_000, nodeNamesFor(TransformStage.RECORD));
+            }
             if (!logsTransforms() || in == 0 || !hasRecordStage) {
                 return;
             }
@@ -1118,13 +1451,25 @@ public class ChunkExecutor {
 
         /** One call handed to the destination, whatever it made of the records inside it. */
         void write(Instant startedAt, RecordBatch batch, Sink.WriteResult result) {
+            log.debug("WRITE {} record(s) to {} — {} written, {} refused{}",
+                    batch.size(), pipeline.sinkNode().name(), result.written(), result.failed(),
+                    result.details() == null
+                            ? ""
+                            : "; destination said " + Payloads.abbreviate(result.details(), 2_000));
             if (!logsWrites()) {
                 return;
             }
             submit(StageLogPort.Stage.WRITE, pipeline.sinkNode().id(), pipeline.sinkNode().name(),
                     pipeline.sinkInstance().connectorType(), writes++, batch.size(), batch.size(),
                     batch.totalBytes(), startedAt, StageLogPort.Outcome.OK, null, null, null,
-                    null, null, result.details(), requestBody(batch), null);
+                    // Deliberately no request body. It was the whole batch — five hundred records
+                    // written a second time, into a second store, where they were already
+                    // individually searchable in the record index and where nothing could find one
+                    // of them anyway. It was routinely too large to keep and arrived truncated to
+                    // a marker, so it answered nothing while costing the most of anything here.
+                    // What a person needs off a call is what the call did, and that is
+                    // result.details(): the status, the job id, the destination's own reply.
+                    null, null, result.details(), null, null);
         }
 
         /**
@@ -1136,6 +1481,7 @@ public class ChunkExecutor {
          */
         void failed(StageLogPort.Stage stage, Instant startedAt, int records, long bytes,
                     Throwable failure) {
+            log.debug("{} FAILED after {} record(s): {}", stage, records, failure.toString());
             boolean read = stage == StageLogPort.Stage.READ;
             if (!(read ? logsReads() : logsWrites())) {
                 return;
@@ -1150,31 +1496,28 @@ public class ChunkExecutor {
                     codeOf(failure), failure.getMessage(), null, null, null, null, null, null);
         }
 
-        /**
-         * The batch as it went over the wire, when the pipeline asked for bodies.
-         *
-         * <p>The envelope where there is one — that is literally the request — and otherwise the
-         * records themselves. Redacted and truncated exactly as a dead-lettered payload is: a
-         * search index is the worst place for unredacted data precisely because it is built to be
-         * searched.
-         */
-        private JsonNode requestBody(RecordBatch batch) {
-            if (!policy.capturesBodies()) {
-                return null;
-            }
-            AuditPolicy audit = pipeline.audit();
-            JsonNode body = batch.envelope().orElseGet(() -> {
-                com.fasterxml.jackson.databind.node.ArrayNode records =
-                        com.dmp.common.json.Json.mapper().createArrayNode();
-                batch.records().forEach(record -> records.add(record.payload()));
-                return records;
-            });
-            return Redaction.apply(Payloads.truncate(body, audit.maxPayloadBytes()), audit);
-        }
-
-        private void submit(StageLogPort.Stage stage, String nodeId, String nodeName,
+            private void submit(StageLogPort.Stage stage, String nodeId, String nodeName,
                             String connectorType, int sequence, int recordsIn, int recordsOut,
                             long bytes, Instant startedAt, StageLogPort.Outcome outcome,
+                            String errorCode, String errorMessage, String query, JsonNode cursorIn,
+                            JsonNode cursorOut, JsonNode details, JsonNode request,
+                            JsonNode response) {
+            submit(stage, nodeId, nodeName, connectorType, sequence, recordsIn, recordsOut, bytes,
+                    Duration.between(startedAt, clock.instant()).toMillis(), outcome, errorCode,
+                    errorMessage, query, cursorIn, cursorOut, details, request, response);
+        }
+
+        /**
+         * The same, for a stage that was timed by somebody else.
+         *
+         * <p>A fetch is reported by the connector after the fact, so its duration is the
+         * connector's measurement. Deriving it from a start instant here would measure the gap
+         * until the engine got round to collecting it, which for the last call before a batch
+         * closes is the whole read window.
+         */
+        private void submit(StageLogPort.Stage stage, String nodeId, String nodeName,
+                            String connectorType, int sequence, int recordsIn, int recordsOut,
+                            long bytes, long durationMillis, StageLogPort.Outcome outcome,
                             String errorCode, String errorMessage, String query, JsonNode cursorIn,
                             JsonNode cursorOut, JsonNode details, JsonNode request,
                             JsonNode response) {
@@ -1183,8 +1526,8 @@ public class ChunkExecutor {
                 stageLog.log(List.of(new StageLogPort.StageEntry(
                         split.tenantId(), pipeline.version().pipelineId(), split.runId(),
                         split.id(), traceId(), stage, nodeId, nodeName, connectorType, sequence,
-                        split.attempt(), recordsIn, recordsOut, bytes,
-                        Duration.between(startedAt, now).toMillis(),
+                        position++,
+                        split.attempt(), recordsIn, recordsOut, bytes, durationMillis,
                         outcome, errorCode, errorMessage, query, cursorIn, cursorOut, details,
                         request, response, now, expiresAt)));
             } catch (RuntimeException e) {

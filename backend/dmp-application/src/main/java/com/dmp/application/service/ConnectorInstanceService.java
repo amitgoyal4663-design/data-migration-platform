@@ -75,7 +75,8 @@ public class ConnectorInstanceService {
 
         ConnectorInstance created = repository.save(ConnectorInstance.create(
                 tenantId, command.name(), command.connectorType(), command.direction(),
-                command.config(), command.secretRefs(), command.description(), now));
+                command.config(), command.secretRefs(), command.description(),
+                command.rateLimit(), now));
 
         audit(tenantId, AuditAction.CREATE, created, null, created,
                 "Created connector instance '" + created.name() + "' of type " + created.connectorType(),
@@ -102,7 +103,7 @@ public class ConnectorInstanceService {
         // carrying ACTIVE forward would present a stale assurance as a current one.
         ConnectorInstance updated = repository.save(existing.updateConfiguration(
                 command.name(), command.config(), command.secretRefs(), command.description(),
-                command.direction(), now));
+                command.direction(), command.rateLimit(), now));
 
         audit(tenantId, AuditAction.UPDATE, updated, existing, updated,
                 "Updated connector instance '" + updated.name() + "'", now);
@@ -213,11 +214,13 @@ public class ConnectorInstanceService {
     }
 
     public record CreateConnectorInstance(String name, String connectorType, ConnectorDirection direction,
-                                          JsonNode config, JsonNode secretRefs, String description) {
+                                          JsonNode config, JsonNode secretRefs, String description,
+                                          com.dmp.domain.connector.RateLimitPolicy rateLimit) {
     }
 
     public record UpdateConnectorInstance(String name, JsonNode config, JsonNode secretRefs,
                                           String description,
-                                          com.dmp.domain.connector.ConnectorDirection direction) {
+                                          com.dmp.domain.connector.ConnectorDirection direction,
+                                          com.dmp.domain.connector.RateLimitPolicy rateLimit) {
     }
 }

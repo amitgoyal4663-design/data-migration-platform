@@ -197,21 +197,39 @@ class MigrationE2EIT {
         // are now the only thing that flushes a chunk before it ends — and that is the mechanism
         // worth testing anyway, because it is the one a real migration hits. A chunk sized in rows
         // says nothing about what those rows weigh.
-        var chunking = new ChunkingPolicy(200, 64L * 1024, Duration.ofSeconds(30), 2,
-                ChunkingPolicy.CHECKPOINT_AUTO);
+        // Checkpoint every batch. On the automatic interval an idempotent sink saves its position
+        // every fiftieth batch, so a chunk that dies at row four hundred has committed nothing and
+        // there is no resume position to assert on — which is correct behaviour and useless for
+        // this test. What is being tested is what happens once a position exists.
+        var chunking = new ChunkingPolicy(200, 64L * 1024, Duration.ofSeconds(30), 2, 1);
         Run run = startRun(chunking, ExecutionPolicy.DEFAULT);
         ResolvedPipeline pipeline = planner.resolve(run);
 
         Split chunk = splits.claimNextPending(tenantId, run.id(), "worker-doomed",
                 clock.instant(), Duration.ofMinutes(5)).orElseThrow();
 
-        // Stop after the third batch, imitating a pod killed mid-chunk. Everything committed so far
-        // is durable; everything after it has not been read.
-        int[] flushes = {0};
+        // Kill the target part-way through, imitating a pod lost mid-chunk. Everything committed so
+        // far is durable; everything after it has not been read.
+        //
+        // This used to interrupt the chunk through a cancellation hook, which no longer exists —
+        // stopping a run now lets the chunk it is running finish, so that a chunk is always a whole
+        // thing. Breaking the destination is a truer simulation of a lost worker anyway: a pod does
+        // not stop politely at a batch boundary, it stops.
+        // A constraint the chunk only trips part-way through, so at least one batch commits before
+        // the destination refuses one. Breaking the target outright — renaming the table away —
+        // failed the very first write, and a chunk with no committed batches has nothing to resume
+        // from, which is the opposite of what this test is about. 64 KiB of these rows is roughly a
+        // thousand of them, so a ceiling of 1,500 falls inside the second batch.
+        try (Connection connection = jdbc(); Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE target_orders ADD CONSTRAINT lost_worker CHECK (id < 1500)");
+        }
         try {
-            executor.execute(pipeline, chunk, "worker-doomed", () -> ++flushes[0] >= 3);
-        } catch (Exception acceptable) {
-            // A torn chunk is expected here.
+            executor.execute(pipeline, chunk, "worker-doomed");
+        } catch (Exception expected) {
+            // A torn chunk is exactly what this is testing.
+        }
+        try (Connection connection = jdbc(); Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE target_orders DROP CONSTRAINT lost_worker");
         }
 
         var midpoint = checkpoints.findBySplit(tenantId, chunk.id()).orElseThrow();
@@ -228,7 +246,7 @@ class MigrationE2EIT {
                 clock.instant(), Duration.ofMinutes(5)).orElseThrow();
         assertThat(reclaimed.id()).isEqualTo(chunk.id());
 
-        executor.execute(pipeline, reclaimed, "worker-rescuer", () -> false);
+        executor.execute(pipeline, reclaimed, "worker-rescuer");
         splits.transitionState(tenantId, reclaimed.id(), SplitState.RUNNING,
                 reclaimed.complete(clock.instant()));
 
@@ -313,7 +331,7 @@ class MigrationE2EIT {
                 break;
             }
             Split chunk = claimed.get();
-            var result = executor.execute(pipeline, chunk, "e2e-worker", () -> false);
+            var result = executor.execute(pipeline, chunk, "e2e-worker");
 
             splits.transitionState(tenantId, chunk.id(), SplitState.RUNNING,
                     chunk.complete(clock.instant()));

@@ -91,6 +91,14 @@ public class SplitRepositoryAdapter implements SplitRepository {
         Query query = scoped(tenantId)
                 .addCriteria(Criteria.where("runId").is(runId.value()))
                 .addCriteria(Criteria.where("state").is(SplitState.PENDING.name()))
+                // Held back until its time, if something asked for that — a chunk deferred because
+                // the destination's agreed rate was spent. Absent on every chunk that was never
+                // deferred, and absent must mean claimable: the field did not exist before
+                // deferral did, and every chunk stored until then has no value for it.
+                .addCriteria(new Criteria().orOperator(
+                        Criteria.where("dueAt").exists(false),
+                        Criteria.where("dueAt").is(null),
+                        Criteria.where("dueAt").lte(now)))
                 .with(Sort.by(Sort.Direction.ASC, "index"));
 
         Update update = new Update()
@@ -98,7 +106,11 @@ public class SplitRepositoryAdapter implements SplitRepository {
                 .set("assignedTo", workerId)
                 .set("leaseExpiresAt", now.plus(lease))
                 .set("startedAt", now)
-                .set("updatedAt", now);
+                .set("updatedAt", now)
+                // The hold has been served. Left behind, it would be a time in the past on a
+                // running chunk — harmless today and exactly the sort of stale field that later
+                // gets read as though it meant something.
+                .unset("dueAt");
 
         SplitDocument claimed = mongo.findAndModify(query, update,
                 FindAndModifyOptions.options().returnNew(true), SplitDocument.class);

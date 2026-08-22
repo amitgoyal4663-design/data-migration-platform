@@ -47,6 +47,15 @@ public class RestConnector implements Source, Sink {
     private static final String TYPE = "rest";
     private static final Duration TIMEOUT = Duration.ofSeconds(60);
 
+    /**
+     * How much of a destination's reply is worth keeping on the call log.
+     *
+     * <p>Generous, because a rejection list for a five-hundred-record batch is the reply worth
+     * having and it is not small. Bounded, because this ends up in a search index and an API that
+     * echoes the whole request back would otherwise store every record twice.
+     */
+    private static final int MAX_REPORTED_RESPONSE_CHARS = 64_000;
+
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
             // Followed automatically: an API that 301s to https is common, and failing on it would
@@ -249,7 +258,73 @@ public class RestConnector implements Source, Sink {
                 if (response.statusCode() >= 400) {
                     throw classify(response, "POST " + config.writeUri() + " failed");
                 }
-                return WriteResult.allWritten(batch.size(), batch.totalBytes());
+
+                // What the API said, kept whether or not it refused anything. A 200 that quietly
+                // dropped half a batch and a 200 that took all of it are the same line in every
+                // count this platform holds; the reply is the only thing that tells them apart,
+                // and it used to be read for its status code and then discarded.
+                JsonNode parsed = parseOrNull(response.body());
+                ObjectNode details = Json.newObject();
+                details.put("status", response.statusCode());
+                if (parsed != null) {
+                    details.set("response", parsed);
+                } else if (!response.body().isBlank()) {
+                    // Not JSON. Still worth keeping — "OK" or an HTML error page is an answer, and
+                    // an empty details node would read as the API having said nothing.
+                    details.put("response", truncated(response.body()));
+                }
+
+                List<Sink.RecordError> rejected = rejections(config, batch, parsed);
+                if (rejected.isEmpty()) {
+                    return WriteResult.allWritten(batch.size(), batch.totalBytes())
+                            .withDetails(details);
+                }
+                return WriteResult.partial(batch.size() - rejected.size(), batch.totalBytes(),
+                        rejected).withDetails(details);
+            }
+
+            /**
+             * The records the API said it would not take, from wherever it says so.
+             *
+             * <p>Off unless {@code rejectedPath} is configured, because there is no convention
+             * here: an API that returns 200 and a list of failures is common, and no two spell it
+             * the same way. Without this the connector reported every 2xx as a clean batch — a
+             * destination could refuse four hundred records out of five hundred and the run would
+             * call all five hundred written, which is the worst answer a migration can give.
+             *
+             * <p>A rejection names its record by {@code index} — its position in the batch as
+             * sent. Anything the API returns that cannot be tied to a record is skipped rather
+             * than guessed at: attributing a failure to the wrong row would put a healthy record
+             * in the dead-letter queue and let the broken one through as written.
+             */
+            private List<Sink.RecordError> rejections(RestConfig config, RecordBatch batch,
+                                                      JsonNode response) {
+                if (config.rejectedPath().isEmpty() || response == null) {
+                    return List.of();
+                }
+                JsonNode rejected = response.at(config.rejectedPath());
+                if (!rejected.isArray() || rejected.isEmpty()) {
+                    return List.of();
+                }
+
+                List<DataRecord> records = batch.records();
+                List<Sink.RecordError> errors = new ArrayList<>();
+                for (JsonNode entry : rejected) {
+                    int index = entry.path("index").asInt(-1);
+                    if (index < 0 || index >= records.size()) {
+                        context.log().warn("The destination rejected an entry this connector "
+                                + "cannot match to a record — it has no usable 'index' within the "
+                                + "{} record(s) sent. It is reported on the call, not against a "
+                                + "record: {}", records.size(), entry);
+                        continue;
+                    }
+                    DataRecord record = records.get(index);
+                    errors.add(new Sink.RecordError(record.seq(), record.key(),
+                            entry.path("code").asText("REJECTED"),
+                            entry.path("message").asText("The destination refused this record"),
+                            record.payload()));
+                }
+                return errors;
             }
 
             private String wrapped(RecordBatch batch) {
@@ -341,6 +416,31 @@ public class RestConnector implements Source, Sink {
         }
     }
 
+    /**
+     * The reply as JSON, or null when it is not JSON at all.
+     *
+     * <p>Unlike {@link #parse(String, URI)} this does not fail. A destination that accepted the
+     * batch and answered {@code OK} has done nothing wrong, and turning a successful write into a
+     * chunk failure over the content type of a reply nobody reads would be absurd.
+     */
+    private static JsonNode parseOrNull(String body) {
+        if (body == null || body.isBlank()) {
+            return null;
+        }
+        try {
+            return Json.mapper().readTree(body);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** The reply, cut to something a search index can hold. */
+    private static String truncated(String body) {
+        return body.length() <= MAX_REPORTED_RESPONSE_CHARS
+                ? body
+                : body.substring(0, MAX_REPORTED_RESPONSE_CHARS) + "…";
+    }
+
     /** Error bodies can be entire HTML pages; a log line is not the place for one. */
     private static String truncate(String body) {
         if (body == null) {
@@ -377,6 +477,12 @@ public class RestConnector implements Source, Sink {
                 "Header the API key is sent in. Defaults to X-API-Key.")));
         properties.set("batchField", ConfigFields.advanced(ConfigFields.sinkField("string",
                 "Wrap records in an object under this field. Leave blank to post a bare array.")));
+        properties.set("rejectedPath", ConfigFields.advanced(ConfigFields.sinkField("string",
+                "JSON pointer to an array of per-record rejections in a successful response, for "
+                        + "an API that answers 200 and lists what it would not take — for example "
+                        + "/rejected. Each entry needs an 'index' giving the record's position in "
+                        + "the batch, and may carry 'code' and 'message'. Left empty, a 2xx is "
+                        + "taken to mean every record was accepted.")));
         properties.set("maxBatchSize", ConfigFields.advanced(ConfigFields.sinkField("integer",
                 "Records per request the API accepts. 0 means no limit.")));
 
@@ -415,6 +521,7 @@ public class RestConnector implements Source, Sink {
             String apiKeyHeader,
             String writeMethod,
             String batchField,
+            String rejectedPath,
             int maxBatchSize) {
 
         enum Pagination {
@@ -456,6 +563,7 @@ public class RestConnector implements Source, Sink {
                     text(config, "apiKeyHeader", "X-API-Key"),
                     text(config, "writeMethod", "POST"),
                     text(config, "batchField", ""),
+                    pointer(text(config, "rejectedPath", "")),
                     config.hasNonNull("maxBatchSize") ? config.get("maxBatchSize").asInt() : 0);
         }
 

@@ -37,6 +37,10 @@
         </dependency>
         <dependency>
             <groupId>com.dmp</groupId>
+            <artifactId>dmp-ratelimit-redis</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.dmp</groupId>
             <artifactId>dmp-events-kafka</artifactId>
         </dependency>
         <dependency>

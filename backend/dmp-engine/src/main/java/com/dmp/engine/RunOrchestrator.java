@@ -449,7 +449,9 @@ public class RunOrchestrator {
         // and its failure message describe that run, not this one.
         List<Split> planned = new ArrayList<>(retryable.size());
         for (Split source : retryable) {
-            planned.add(Split.plan(retry.id(), tenantId, source.index(), source.spec(), now));
+            // Same rows as the chunk it retries — it is the same range, read again.
+            planned.add(Split.plan(retry.id(), tenantId, source.index(), source.spec(),
+                    source.plannedRows(), now));
         }
         splits.saveAll(planned);
 
@@ -612,6 +614,13 @@ public class RunOrchestrator {
      * <p>Checkpoints are keyed by chunk and the retry's chunks are new, so resuming means moving
      * the position across rather than sharing it. Sharing would let a running retry advance a
      * finished run's record, which is the one thing this design refuses to do anywhere.
+     *
+     * <p><b>A chunk that never started still has a position worth carrying.</b> This once filtered
+     * on progress, which is right for a chunk with a range of its own and wrong for a lazily
+     * chunked source, where the chunk <em>is</em> its cursor. Stopping such a run and resuming it
+     * dropped the seed, so the replacement chunk began at the start of the source: a ten-thousand
+     * record migration stopped and resumed twice wrote twenty-six thousand records, with every
+     * chunk reporting success.
      */
     private void carryCheckpointsForward(TenantId tenantId, List<Split> originals,
                                          List<Split> replacements) {
@@ -626,7 +635,7 @@ public class RunOrchestrator {
                 continue;
             }
             checkpoints.findBySplit(tenantId, original.id())
-                    .filter(Checkpoint::hasProgress)
+                    .filter(Checkpoint::hasResumePosition)
                     .ifPresent(previous -> checkpoints.save(
                             previous.copiedTo(replacement.runId(), replacement.id())));
         }

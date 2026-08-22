@@ -128,6 +128,24 @@ public interface RecordIndexPort {
             Outcome outcome,
             String errorCode,
             com.fasterxml.jackson.databind.JsonNode payload,
+            /**
+             * The record as the source produced it, when a transform changed it.
+             *
+             * <p>{@code payload} alone answers "what did we send"; it cannot answer "and what did
+             * we read", which is the question asked whenever the two are suspected of differing —
+             * a mapping that dropped a field, a script that wrote the wrong value. Null when no
+             * transform ran, when nothing changed, or when the audit policy does not keep payloads:
+             * storing an identical copy beside every record would double the index to say nothing.
+             */
+            com.fasterxml.jackson.databind.JsonNode sourcePayload,
+            /**
+             * What the destination or the transform said when it refused the record.
+             *
+             * <p>The code names the kind of failure; this is the sentence. For a script it is the
+             * exception's own message — "Cannot read property 'address' of undefined" — which is
+             * the difference between knowing a transform failed and knowing why.
+             */
+            String errorMessage,
             Instant occurredAt,
             Instant expiresAt) {
     }
@@ -140,6 +158,16 @@ public interface RecordIndexPort {
         REJECTED,
         /** Dropped by a transform on purpose. A success, not a failure. */
         FILTERED,
+        /**
+         * A transform threw on this record, so it never reached the destination.
+         *
+         * <p>Distinct from {@link #FILTERED} because the difference is the whole answer to a
+         * support question: one is a decision the pipeline made, the other is a defect. Counting
+         * them together would let a broken script look like a working filter — which is the same
+         * reasoning the engine already applies to its counters, now reaching the index that the
+         * people answering the question actually search.
+         */
+        TRANSFORM_FAILED,
         /**
          * Handed to a destination that decides later, and no per-record verdict came back.
          *
@@ -156,6 +184,26 @@ public interface RecordIndexPort {
          * {@code Sink.Harvest}. What it says is exactly true: this record was sent, the destination
          * accepted the batch, and nobody asked it record by record what became of this one.
          */
-        SENT
+        SENT,
+        /**
+         * Sent in a call the destination refused outright, so its fate is the whole batch's.
+         *
+         * <p>Which is what an ordinary API failure looks like. A 500, a timeout, a rejected
+         * payload: one status for the call, no verdict per record. Only a few destinations —
+         * Salesforce, a bulk loader — answer record by record, and treating that as the norm left
+         * the common case with nowhere to go.
+         *
+         * <p>Distinct from {@link #REJECTED}, and the distinction is the one a support desk needs.
+         * {@code REJECTED} means the destination looked at <em>this</em> record and would not have
+         * it — retrying changes nothing until the record does. This means the destination never
+         * gave an opinion on this record at all; the call it travelled in failed, and it may well
+         * be written on the next attempt. Reporting the first as the second would send somebody to
+         * fix a record that was never the problem.
+         *
+         * <p>Overwritten when the chunk is retried, because a retried chunk reuses its trace ids
+         * — so a batch that failed once and succeeded on the second attempt ends up {@code
+         * WRITTEN}, and only a batch that never succeeded stays here.
+         */
+        CALL_FAILED
     }
 }

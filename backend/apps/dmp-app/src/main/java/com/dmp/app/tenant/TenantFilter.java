@@ -44,6 +44,7 @@ public class TenantFilter extends OncePerRequestFilter {
 
     private static final String MDC_TENANT = "tenantId";
     private static final String MDC_REQUEST = "requestId";
+    private static final String MDC_TRACE = "trace";
 
     private final TenantRepository tenants;
     private final String defaultTenantSlug;
@@ -71,6 +72,9 @@ public class TenantFilter extends OncePerRequestFilter {
             });
 
             MDC.put(MDC_REQUEST, requestId);
+            // The same field the engine writes while a chunk runs, so one column in the log
+            // identifies the work whatever produced it.
+            MDC.put(MDC_TRACE, requestId);
             response.setHeader(REQUEST_ID_HEADER, requestId);
             chain.doFilter(request, response);
         } finally {
@@ -79,6 +83,7 @@ public class TenantFilter extends OncePerRequestFilter {
             TenantContextHolder.clear();
             MDC.remove(MDC_TENANT);
             MDC.remove(MDC_REQUEST);
+            MDC.remove(MDC_TRACE);
         }
     }
 

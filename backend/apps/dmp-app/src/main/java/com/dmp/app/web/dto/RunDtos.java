@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.swagger.v3.oas.annotations.media.Schema;
 
 import java.time.Instant;
+import java.util.List;
 
 /** Web contract for runs, chunks and rejected records. */
 public final class RunDtos {
@@ -52,6 +53,10 @@ public final class RunDtos {
                     + "separate runs on purpose: the original's duration and metrics stay a "
                     + "truthful record of what happened.")
             String retryOf,
+
+            @Schema(description = "Resumes and retries of this run, oldest first. Empty for the "
+                    + "overwhelming majority of runs, which were never resumed.")
+            List<Response> attempts,
             @Schema(description = "CREATED, VALIDATED, PREPARING, RUNNING, PAUSED, STOPPING, "
                     + "FINALIZING, COMPLETED, FAILED, STOPPED or ARCHIVED")
             String state,
@@ -77,6 +82,39 @@ public final class RunDtos {
             Instant startedAt,
             Instant endedAt) {
 
+        /**
+         * This run with its whole chain of attempts nested underneath, oldest first.
+         *
+         * <p>Depth first, because an attempt can itself be resumed. Flattened rather than nested at
+         * each level: a chain is read as a sequence of attempts, and a tree of one-child nodes is a
+         * sequence drawn awkwardly.
+         */
+        public static Response withAttempts(Run run, java.util.Map<String, List<Run>> byParent,
+                                            Instant now) {
+            List<Run> children = byParent.getOrDefault(run.id().toString(), List.of()).stream()
+                    .sorted(java.util.Comparator.comparing(
+                            Run::createdAt, java.util.Comparator.nullsLast(Instant::compareTo)))
+                    .toList();
+
+            List<Response> attempts = children.stream()
+                    .<Response>mapMulti((child, collect) -> {
+                        Response nested = withAttempts(child, byParent, now);
+                        collect.accept(nested);
+                        nested.attempts().forEach(collect);
+                    })
+                    .toList();
+
+            return from(run, now).carrying(attempts);
+        }
+
+        /** This response with its chain attached; everything else is left exactly as it is. */
+        public Response carrying(List<Response> chain) {
+            return new Response(id, pipelineId, pipelineVersionId, versionNumber, mode, trigger,
+                    retryOf, chain, state, active, terminal, waitingOnExternalSystem, metrics,
+                    progress, durationSeconds, parameters, errorCode, errorMessage, triggeredBy,
+                    createdAt, startedAt, endedAt);
+        }
+
         public static Response from(Run run, Instant now) {
             var metrics = run.metrics();
             return new Response(
@@ -87,6 +125,7 @@ public final class RunDtos {
                     run.mode().name(),
                     run.trigger().name(),
                     run.retryOf() == null ? null : run.retryOf().toString(),
+                    List.of(),
                     run.state().name(),
                     run.isActive(),
                     run.isTerminal(),
@@ -157,8 +196,14 @@ public final class RunDtos {
             @Schema(description = "Records this chunk has written, from its checkpoint. Survives a "
                     + "failure, so it also says how much a restart-from-the-beginning would re-send.")
             long recordsWritten,
-            @Schema(description = "Records this chunk's sink rejected")
+            @Schema(description = "Records this chunk did not deliver and did not mean to drop: "
+                    + "a transform threw on them, or the destination refused them")
             long recordsFailed,
+            @Schema(description = "Records a transform dropped on purpose. Not a failure, and "
+                    + "shown beside one so the difference is visible per chunk rather than only "
+                    + "in the run's totals — a chunk filtering far more than its neighbours is a "
+                    + "question worth asking, and nothing else on this row would raise it.")
+            long recordsFiltered,
             @Schema(description = "Share of this chunk's records that were rejected, 0 to 100. "
                     + "Makes the one bad chunk in forty visible without opening each in turn.")
             Integer rejectionPercent,
@@ -183,6 +228,7 @@ public final class RunDtos {
         public static ChunkResponse from(Split split, Checkpoint checkpoint) {
             long produced = checkpoint == null ? 0 : checkpoint.recordsProduced();
             long failed = checkpoint == null ? 0 : checkpoint.recordsFailed();
+            long filtered = checkpoint == null ? 0 : checkpoint.recordsFiltered();
 
             return new ChunkResponse(
                     split.id().toString(),
@@ -196,6 +242,11 @@ public final class RunDtos {
                     split.errorMessage(),
                     checkpoint == null ? 0 : checkpoint.recordsWritten(),
                     failed,
+                    filtered,
+                    // Over what the chunk attempted to deliver, which is produced — records a
+                    // filter dropped are deliberately not in it. Including them would let a
+                    // pipeline that filters ninety-nine percent of its input report a near-perfect
+                    // delivery rate however badly the destination behaved.
                     produced <= 0 ? null : (int) (failed * 100 / produced),
                     checkpoint != null && checkpoint.hasProgress(),
                     split.hasExternalJob(),

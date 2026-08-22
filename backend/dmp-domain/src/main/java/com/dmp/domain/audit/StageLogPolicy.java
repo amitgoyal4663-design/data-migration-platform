@@ -16,9 +16,12 @@ import java.util.Map;
  * <p>Three stages, matching the three things a chunk actually does:
  *
  * <ul>
- *   <li><b>{@code reads}</b> — one entry per window of reading, carrying the query the connector
- *       actually built and the cursor either side of it. The answer to "why did this move
- *       nothing?", which was previously assembled inside a connector and discarded.</li>
+ *   <li><b>{@code reads}</b> — the source side, at two grains. One entry per window of reading,
+ *       carrying the query the connector actually built and the cursor either side of it — the
+ *       answer to "why did this move nothing?", which was previously assembled inside a connector
+ *       and discarded. And one entry per <em>call the connector actually made</em>, which only the
+ *       connector can report: a read window ends when a batch fills, so a single thousand-row call
+ *       buffered into two batches looks exactly like the query running twice, and did.</li>
  *   <li><b>{@code transforms}</b> — one entry per transform stage per batch, carrying records in,
  *       records out and how long the scripts took. The answer to "where did my records go?"; a
  *       filter and a fan-out are both invisible in the counts until something names the node.</li>
@@ -27,8 +30,15 @@ import java.util.Map;
  * </ul>
  *
  * <p>{@code bodies} is separate from all three because it costs a different order of magnitude.
- * The stage entries are one per batch and hold no customer data; a body is the batch itself, in a
- * store built to be searched, and can be megabytes per call.
+ * The stage entries are one per batch and hold no customer data; a body can be megabytes per call.
+ *
+ * <p><b>It no longer covers the records sent to a destination.</b> That was the batch itself —
+ * five hundred records written a second time, into a second store, where the record index already
+ * held each of them individually and searchably. It was routinely over the payload cap and so
+ * arrived as a truncation marker: the most expensive field here, answering nothing. What remains
+ * is what a destination or a source <em>said</em> — a status, a job id, a rejection list, a
+ * response body — which is small, is unavailable anywhere else, and is the reason somebody opens
+ * a call log at all.
  *
  * <p>All four default to off. A platform that silently began writing a new index on upgrade would
  * be spending a user's storage on a decision they never made.

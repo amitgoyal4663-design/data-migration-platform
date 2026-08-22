@@ -29,6 +29,7 @@
         <module>connectors/dmp-connector-salesforce</module>
         <module>connectors/dmp-connector-databricks</module>
         <module>dmp-recordlog-opensearch</module>
+        <module>dmp-ratelimit-redis</module>
         <module>dmp-events-kafka</module>
         <module>dmp-transform-api</module>
         <module>dmp-transform-graaljs</module>

@@ -227,7 +227,11 @@ public class RunPlanner {
 
             List<Split> planned = new ArrayList<>(specs.size());
             for (Source.SplitSpec spec : specs) {
-                planned.add(Split.plan(run.id(), run.tenantId(), spec.id(), spec.spec(), clock.instant()));
+                // The size travels with the chunk. A connector that counted its rows at planning
+                // time is the only thing that ever knows them, and by read time the manifest that
+                // said so is long gone.
+                planned.add(Split.plan(run.id(), run.tenantId(), spec.id(), spec.spec(),
+                        spec.rows(), clock.instant()));
             }
             splits.saveAll(planned);
 

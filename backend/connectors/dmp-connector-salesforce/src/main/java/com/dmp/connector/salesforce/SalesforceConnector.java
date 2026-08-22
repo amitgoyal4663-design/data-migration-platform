@@ -2,6 +2,7 @@ package com.dmp.connector.salesforce;
 
 import com.dmp.common.json.Json;
 import com.dmp.connector.api.ConfigFields;
+import com.dmp.connector.api.CallCost;
 import com.dmp.connector.api.ConnectorContext;
 import com.dmp.connector.api.ConnectorException;
 import com.dmp.connector.api.ConnectorSpec;
@@ -92,7 +93,16 @@ public class SalesforceConnector implements Source, Sink {
                 ConnectorSpec.Direction.BOTH,
                 configSchema(),
                 Set.of("clientId", "clientSecret", "username", "password"),
-                "1.0.0");
+                "1.0.0",
+                // One chunk is one job, and a job is what a rate limit on this connector should
+                // count. Underneath it is a create, an upload, an "upload complete", however many
+                // status polls the org's queue happens to require, and a fetch of the counts — and
+                // that number is a property of how busy Salesforce is, not of the migration. Billed
+                // per request, the identical chunk would cost four times as much on a busy morning.
+                //
+                // A limit set here is therefore in jobs. An org's daily API allowance is in
+                // requests, so divide: roughly fourteen requests per job.
+                CallCost.PER_CHUNK);
     }
 
     /**

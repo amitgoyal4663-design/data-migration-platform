@@ -27,6 +27,8 @@ import java.util.regex.Pattern;
  * @param configSchema  JSON Schema for the configuration object
  * @param secretFields  JSON pointer paths whose values are secret references
  * @param version       connector version, independent of the platform's
+ * @param callCost      how one chunk turns into requests, for rate limiting. Most connectors leave
+ *                      this alone; see {@link CallCost}.
  */
 public record ConnectorSpec(
         String type,
@@ -35,7 +37,21 @@ public record ConnectorSpec(
         Direction direction,
         JsonNode configSchema,
         Set<String> secretFields,
-        String version) {
+        String version,
+        CallCost callCost) {
+
+    /**
+     * The seven-argument form, which is every connector that charges one call per request.
+     *
+     * <p>Kept so that declaring a connector says nothing about rate limiting unless the connector
+     * has something to say — the majority do not, and making all of them name a default would put
+     * the rare case in front of the common one.
+     */
+    public ConnectorSpec(String type, String displayName, String description, Direction direction,
+                         JsonNode configSchema, Set<String> secretFields, String version) {
+        this(type, displayName, description, direction, configSchema, secretFields, version,
+                CallCost.PER_REQUEST);
+    }
 
     private static final Pattern TYPE = Pattern.compile("^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$");
 
@@ -50,6 +66,7 @@ public record ConnectorSpec(
         configSchema = Json.orEmpty(configSchema);
         secretFields = Set.copyOf(secretFields == null ? Set.of() : secretFields);
         version = version == null || version.isBlank() ? "0.0.0" : version;
+        callCost = callCost == null ? CallCost.PER_REQUEST : callCost;
     }
 
     /** Which pipeline roles a connector can fill. Most are symmetric; some genuinely are not. */

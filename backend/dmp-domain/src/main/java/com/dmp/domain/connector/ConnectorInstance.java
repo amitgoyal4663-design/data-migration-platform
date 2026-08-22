@@ -44,10 +44,25 @@ public record ConnectorInstance(
         String lastTestError,
         Instant createdAt,
         Instant updatedAt,
-        long rowVersion) {
+        long rowVersion,
+        RateLimitPolicy rateLimit) {
 
     private static final int MAX_NAME_LENGTH = 255;
     private static final Pattern CONNECTOR_TYPE = Pattern.compile("^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$");
+
+    /**
+     * The signature before rate limits existed, kept so that every caller which has no opinion on
+     * the matter reads as though the field were not there. A connector with no agreement to honour
+     * is the overwhelming majority, and making all of them pass {@code NONE} would put the rare
+     * case in front of the common one on every line.
+     */
+    public ConnectorInstance(ConnectorInstanceId id, TenantId tenantId, String name, String connectorType,
+                             ConnectorDirection direction, JsonNode config, JsonNode secretRefs,
+                             ConnectorInstanceStatus status, String description, Instant lastTestedAt,
+                             String lastTestError, Instant createdAt, Instant updatedAt, long rowVersion) {
+        this(id, tenantId, name, connectorType, direction, config, secretRefs, status, description,
+                lastTestedAt, lastTestError, createdAt, updatedAt, rowVersion, RateLimitPolicy.NONE);
+    }
 
     public ConnectorInstance {
         Objects.requireNonNull(id, "id");
@@ -73,6 +88,10 @@ public record ConnectorInstance(
         }
         config = Json.orEmpty(config);
         secretRefs = Json.orEmpty(secretRefs);
+        // Absent means unlimited, and a null here would make every reader check. Rows written
+        // before the field existed deserialise to null, so this is the load path as well as a
+        // convenience.
+        rateLimit = rateLimit == null ? RateLimitPolicy.NONE : rateLimit;
     }
 
     /**
@@ -99,9 +118,17 @@ public record ConnectorInstance(
     public static ConnectorInstance create(TenantId tenantId, String name, String connectorType,
                                            ConnectorDirection direction, JsonNode config,
                                            JsonNode secretRefs, String description, Instant now) {
+        return create(tenantId, name, connectorType, direction, config, secretRefs, description,
+                RateLimitPolicy.NONE, now);
+    }
+
+    public static ConnectorInstance create(TenantId tenantId, String name, String connectorType,
+                                           ConnectorDirection direction, JsonNode config,
+                                           JsonNode secretRefs, String description,
+                                           RateLimitPolicy rateLimit, Instant now) {
         return new ConnectorInstance(ConnectorInstanceId.newId(), tenantId, name, connectorType, direction,
                 config, requireReferencesNotValues(secretRefs), ConnectorInstanceStatus.UNTESTED,
-                description, null, null, now, now, 0L);
+                description, null, null, now, now, 0L, rateLimit);
     }
 
     /**
@@ -190,33 +217,54 @@ public record ConnectorInstance(
     public ConnectorInstance updateConfiguration(String newName, JsonNode newConfig, JsonNode newSecretRefs,
                                                  String newDescription, ConnectorDirection newDirection,
                                                  Instant now) {
+        return updateConfiguration(newName, newConfig, newSecretRefs, newDescription, newDirection,
+                rateLimit, now);
+    }
+
+    /**
+     * Replaces the configuration and the agreement with the far end together.
+     *
+     * <p>The rate limit rides on the same edit rather than a separate call because it comes from the
+     * same conversation with the same client, and a two-step update has a window in which the
+     * endpoint has been changed but the limit still describes the old one.
+     *
+     * <p>Unlike the rest of a configuration change, editing this does <em>not</em> need a fresh
+     * connectivity test to mean anything — but it goes through the same reset regardless, because a
+     * single rule about when ACTIVE is trustworthy is worth more than the one saved click.
+     */
+    public ConnectorInstance updateConfiguration(String newName, JsonNode newConfig, JsonNode newSecretRefs,
+                                                 String newDescription, ConnectorDirection newDirection,
+                                                 RateLimitPolicy newRateLimit, Instant now) {
         return new ConnectorInstance(id, tenantId, newName, connectorType,
                 newDirection == null ? direction : newDirection,
                 newConfig, requireReferencesNotValues(newSecretRefs),
                 ConnectorInstanceStatus.UNTESTED, newDescription,
-                lastTestedAt, lastTestError, createdAt, now, rowVersion);
+                lastTestedAt, lastTestError, createdAt, now, rowVersion,
+                newRateLimit == null ? RateLimitPolicy.NONE : newRateLimit);
     }
 
     public ConnectorInstance recordTestSuccess(Instant now) {
         return new ConnectorInstance(id, tenantId, name, connectorType, direction, config, secretRefs,
-                ConnectorInstanceStatus.ACTIVE, description, now, null, createdAt, now, rowVersion);
+                ConnectorInstanceStatus.ACTIVE, description, now, null, createdAt, now, rowVersion,
+                rateLimit);
     }
 
     public ConnectorInstance recordTestFailure(String error, Instant now) {
         return new ConnectorInstance(id, tenantId, name, connectorType, direction, config, secretRefs,
-                ConnectorInstanceStatus.FAILED, description, now, error, createdAt, now, rowVersion);
+                ConnectorInstanceStatus.FAILED, description, now, error, createdAt, now, rowVersion,
+                rateLimit);
     }
 
     public ConnectorInstance disable(Instant now) {
         return new ConnectorInstance(id, tenantId, name, connectorType, direction, config, secretRefs,
                 ConnectorInstanceStatus.DISABLED, description, lastTestedAt, lastTestError,
-                createdAt, now, rowVersion);
+                createdAt, now, rowVersion, rateLimit);
     }
 
     public ConnectorInstance enable(Instant now) {
         return new ConnectorInstance(id, tenantId, name, connectorType, direction, config, secretRefs,
                 ConnectorInstanceStatus.UNTESTED, description, lastTestedAt, lastTestError,
-                createdAt, now, rowVersion);
+                createdAt, now, rowVersion, rateLimit);
     }
 
     /**

@@ -258,7 +258,7 @@ class BatchDeliveryTest {
     private ChunkResult run(DeliveryPolicy delivery) {
         Split split = Split.plan(runId, tenantId, 0, Json.emptyObject(), NOW)
                 .claim("worker-1", NOW, Duration.ofMinutes(5));
-        return executor.execute(pipeline(delivery), split, "worker-1", () -> false);
+        return executor.execute(pipeline(delivery), split, "worker-1");
     }
 
     private ResolvedPipeline pipeline(DeliveryPolicy delivery) {

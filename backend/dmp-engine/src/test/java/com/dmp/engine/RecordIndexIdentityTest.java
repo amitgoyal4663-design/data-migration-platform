@@ -258,7 +258,7 @@ class RecordIndexIdentityTest {
     }
 
     private ChunkResult run(DeliveryPolicy delivery) {
-        return executor.execute(pipeline(delivery), split, "worker-1", () -> false);
+        return executor.execute(pipeline(delivery), split, "worker-1");
     }
 
     /** Indexing every record is opt-in, so these tests have to opt in. */

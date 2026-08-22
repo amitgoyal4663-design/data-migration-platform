@@ -34,7 +34,10 @@ public final class SplitMapper {
                 // An absent handle round-trips as an empty object, which the Split constructor
                 // collapses back to null — so "no remote job" survives the trip in both directions.
                 JsonDocuments.toJson(doc.getExternalJob()),
-                doc.getDueAt());
+                doc.getDueAt(),
+                // Absent on every split written before chunks knew their own size, which reads
+                // back as 0 — "cannot say" — and behaves exactly as it did before.
+                doc.getPlannedRows());
     }
 
     public static SplitDocument toDocument(Split split) {
@@ -56,6 +59,7 @@ public final class SplitMapper {
         doc.setUpdatedAt(split.updatedAt());
         doc.setExternalJob(JsonDocuments.toMap(split.externalJob()));
         doc.setDueAt(split.dueAt());
+        doc.setPlannedRows(split.plannedRows());
         return doc;
     }
 }

@@ -92,6 +92,16 @@ public interface RunRepository {
 
     Page<Run> search(TenantId tenantId, RunSearch criteria, PageQuery pageQuery);
 
+    /**
+     * The attempts belonging to the given migrations — every run that resumed or retried one of
+     * them, and every run that resumed those, to the end of each chain.
+     *
+     * <p>Fetched for a page of migrations in one go rather than a query per row, because a list of
+     * twenty-five would otherwise be twenty-five round trips to display something most of them do
+     * not have.
+     */
+    List<Run> findAttemptsOf(TenantId tenantId, java.util.Collection<RunId> roots);
+
     /** Runs currently occupying worker capacity. Used for concurrency limits and the dashboard. */
     List<Run> findActive(TenantId tenantId);
 
@@ -124,10 +134,28 @@ public interface RunRepository {
     List<Run> findPreparingDueForCheck(Instant dueBefore, int limit);
 
     record RunSearch(PipelineId pipelineId, Set<RunState> states, Instant startedAfter,
-                     Instant startedBefore, String triggeredBy) {
+                     Instant startedBefore, String triggeredBy, boolean rootsOnly) {
 
         public RunSearch {
             states = Set.copyOf(states == null ? Set.of() : states);
+        }
+
+        /** The four-argument form, from before a run could be an attempt within a migration. */
+        public RunSearch(PipelineId pipelineId, Set<RunState> states, Instant startedAfter,
+                         Instant startedBefore, String triggeredBy) {
+            this(pipelineId, states, startedAfter, startedBefore, triggeredBy, false);
+        }
+
+        /**
+         * Only runs that started a migration, excluding the resumes and retries within one.
+         *
+         * <p>What makes a page size mean what it says. A run stopped and resumed three times is one
+         * migration and four rows in the store, so a page of twenty-five runs was drawing eight
+         * groups — the number somebody chose bore no relation to what they saw. Pages are counted
+         * in migrations; the attempts inside one travel with it.
+         */
+        public RunSearch onlyRoots() {
+            return new RunSearch(pipelineId, states, startedAfter, startedBefore, triggeredBy, true);
         }
 
         public static RunSearch none() {

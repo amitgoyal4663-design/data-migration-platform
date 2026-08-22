@@ -176,8 +176,89 @@ public interface Source extends Connector {
             return null;
         }
 
+        /**
+         * The real interactions with the source since this was last called, and clears them.
+         *
+         * <p><b>Why the connector has to say.</b> The engine cannot count these. It sees records
+         * arriving from {@link #next()} and nothing else — paging, statement execution and link
+         * following all happen inside the connector — so the only boundary it can observe is the
+         * batch it is filling. That made the read log batch-shaped while everybody reading it took
+         * it to be source-shaped: one thousand rows pulled in a single call, buffered into two
+         * batches of five hundred, appeared as two read entries carrying the same query, and a
+         * developer debugging it had no way to tell that from the query genuinely running twice.
+         *
+         * <p>Drained rather than pushed so a connector needs no reference to the engine and nothing
+         * blocks: record a {@link Fetch} where the call is made, and the engine collects them at
+         * each batch boundary. Draining must be cheap and must not perform I/O.
+         *
+         * <p>Defaults to nothing, so a connector that has not been taught this still reads normally
+         * — it forfeits the fetch entries, not the ability to run.
+         */
+        default List<Fetch> drainFetches() {
+            return List.of();
+        }
+
         @Override
         void close();
+    }
+
+    /**
+     * One real interaction with the source: a statement executed, a page pulled, a link followed.
+     *
+     * <p>Distinct from a read window, and the distinction is the point. A read window is the
+     * engine's unit — however much reading it took to fill one batch. This is the source's unit,
+     * and it is the one that answers how many times the remote system was actually asked.
+     *
+     * @param reason    why this call was made, in a few plain words — "read result chunk 5",
+     *                  "read the result schema", "follow the external link". The field people
+     *                  actually want and the one the log did not have: a URL says what was
+     *                  requested and never why, so a chunk showing two fetches left a reader
+     *                  guessing whether the second was a retry, a page, or a different resource
+     *                  altogether. Most connectors already build this string for their error
+     *                  messages and then discard it
+     * @param describe  what was asked, in the source's own language — a URL, a SQL statement, a
+     *                  filter. Bind values belong as placeholders: this is written to a search
+     *                  index and is not exempt from redaction.
+     * @param startedAt when the call was made, so the entry lands in the log where it happened
+     *                  rather than where it was collected
+     * @param durationMillis how long the remote system took, which is the number that distinguishes
+     *                  a slow source from a slow script
+     * @param rows      rows the call returned, before any of them were read
+     * @param bytes     what it weighed on the wire, or 0 if the connector cannot tell
+     * @param request   the request body, or null. Only recorded when the pipeline captures bodies
+     * @param response  what came back, or null. Same condition
+     * @param errorCode a short code when the call failed, or null when it succeeded
+     * @param errorMessage why it failed, or null
+     */
+    record Fetch(
+            String reason,
+            String describe,
+            java.time.Instant startedAt,
+            long durationMillis,
+            long rows,
+            long bytes,
+            JsonNode request,
+            JsonNode response,
+            String errorCode,
+            String errorMessage) {
+
+        /** The ordinary case: a call that worked. */
+        public static Fetch ok(String reason, String describe, java.time.Instant startedAt,
+                               long durationMillis, long rows, long bytes) {
+            return new Fetch(reason, describe, startedAt, durationMillis, rows, bytes, null, null,
+                    null, null);
+        }
+
+        /** A call that did not come back, which is the entry worth having most. */
+        public static Fetch failed(String reason, String describe, java.time.Instant startedAt,
+                                   long durationMillis, String errorCode, String errorMessage) {
+            return new Fetch(reason, describe, startedAt, durationMillis, 0, 0, null, null,
+                    errorCode, errorMessage);
+        }
+
+        public boolean succeeded() {
+            return errorCode == null;
+        }
     }
 
     /**
@@ -189,12 +270,38 @@ public interface Source extends Connector {
      * @param id    stable within a run; the engine orders chunks by it
      * @param spec  a key range, a partition, a file path, a result-set index
      * @param label short human-readable description, shown in the console
+     * @param rows  how many rows this chunk covers, or 0 when the connector cannot say
      */
-    record SplitSpec(int id, JsonNode spec, String label) {
+    record SplitSpec(int id, JsonNode spec, String label, long rows) {
 
         public SplitSpec {
             spec = Json.orEmpty(spec);
             label = label == null || label.isBlank() ? "chunk " + id : label;
+            rows = Math.max(0, rows);
+        }
+
+        /**
+         * A chunk whose size the connector does not know.
+         *
+         * <p>Which is the honest answer for a key range over unknown data — "ids 1 to 1000" is
+         * not a thousand rows if nine hundred were deleted — and the engine falls back to the
+         * sink's preferred batch, as it always did.
+         */
+        public SplitSpec(int id, JsonNode spec, String label) {
+            this(id, spec, label, 0);
+        }
+
+        /**
+         * Whether this chunk knows its own size.
+         *
+         * <p>The reason it matters is the batch. A chunk that knows it holds a thousand rows is
+         * one batch of a thousand; one that does not falls back to whatever the destination
+         * prefers, which is how a thousand-row chunk came to be read and written twice in five
+         * hundreds — with the log showing the source query twice and nothing saying it had run
+         * once.
+         */
+        public boolean knowsItsSize() {
+            return rows > 0;
         }
 
         /** For sources that cannot be divided — a cursor-paged REST API, a single small file. */

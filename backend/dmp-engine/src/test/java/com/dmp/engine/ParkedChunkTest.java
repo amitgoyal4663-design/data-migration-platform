@@ -115,7 +115,7 @@ class ParkedChunkTest {
         FakeAsyncSink sink = new FakeAsyncSink(Preparation.Status.ready());
         when(connectors.sink(anyString())).thenReturn(sink);
 
-        ChunkResult result = executor.execute(pipeline(), parkedSplit(), "worker-2", () -> false);
+        ChunkResult result = executor.execute(pipeline(), parkedSplit(), "worker-2");
 
         verify(connectors, never()).source(anyString());
         assertThat(sink.wrote)
@@ -145,7 +145,7 @@ class ParkedChunkTest {
         when(connectors.sink(anyString()))
                 .thenReturn(new FakeAsyncSink(Preparation.Status.failed("InvalidBatch: bad field")));
 
-        assertThatThrownBy(() -> executor.execute(pipeline(), parkedSplit(), "worker-2", () -> false))
+        assertThatThrownBy(() -> executor.execute(pipeline(), parkedSplit(), "worker-2"))
                 .isInstanceOf(com.dmp.connector.api.ConnectorException.class)
                 .hasMessageContaining("bad field")
                 .matches(e -> !((com.dmp.connector.api.ConnectorException) e).isRetryable(),
@@ -160,7 +160,7 @@ class ParkedChunkTest {
         when(connectors.sink(anyString())).thenReturn(
                 new FakeAsyncSink(Preparation.Status.pending(Duration.ofSeconds(7))));
 
-        assertThatThrownBy(() -> executor.execute(pipeline(), parkedSplit(), "worker-2", () -> false))
+        assertThatThrownBy(() -> executor.execute(pipeline(), parkedSplit(), "worker-2"))
                 .isInstanceOf(ChunkParkedException.class)
                 .extracting(e -> ((ChunkParkedException) e).retryAfter())
                 .isEqualTo(Duration.ofSeconds(7));

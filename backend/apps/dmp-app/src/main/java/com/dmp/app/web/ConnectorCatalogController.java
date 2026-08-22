@@ -60,7 +60,14 @@ public class ConnectorCatalogController {
             JsonNode configSchema,
             @Schema(description = "Config fields holding secret references rather than values")
             Set<String> secretFields,
-            String version) {
+            String version,
+
+            @Schema(description = "How one chunk is counted against a rate limit. PER_REQUEST means "
+                    + "one call per delivery group; PER_CHUNK means the whole chunk is one unit of "
+                    + "work however many requests it takes underneath, as for a bulk job that is "
+                    + "created, uploaded and polled to completion.",
+                    example = "PER_REQUEST")
+            String callCost) {
 
         static Response from(ConnectorSpec spec) {
             return new Response(
@@ -70,7 +77,8 @@ public class ConnectorCatalogController {
                     spec.direction().name(),
                     spec.configSchema(),
                     spec.secretFields(),
-                    spec.version());
+                    spec.version(),
+                    spec.callCost().name());
         }
     }
 }

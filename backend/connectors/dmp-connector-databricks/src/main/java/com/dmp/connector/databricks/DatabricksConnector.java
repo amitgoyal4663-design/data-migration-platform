@@ -115,6 +115,13 @@ public class DatabricksConnector implements Source {
              */
             @Override
             public Preparation prepare() {
+                // Nothing to prepare when each chunk runs its own query. There is no shared
+                // statement to submit, nothing for the run to wait on before dividing the work,
+                // and so no preparation phase at all — the run goes straight to planning.
+                if (config.chunkMode() == DatabricksConfig.ChunkMode.OFFSET) {
+                    return Preparation.none();
+                }
+
                 ObjectNode request = Json.newObject();
                 request.put("statement", config.sql());
                 request.put("warehouse_id", config.warehouseId());
@@ -224,6 +231,9 @@ public class DatabricksConnector implements Source {
              */
             @Override
             public List<SplitSpec> plan(Preparation preparation, PlanRequest request) {
+                if (config.chunkMode() == DatabricksConfig.ChunkMode.OFFSET) {
+                    return planByOffset(session, config, context, request);
+                }
                 String statementId = statementId(preparation.state());
                 JsonNode manifest = session.getJson(
                         config.statementsUrl() + "/" + statementId, "read the result manifest")
@@ -252,9 +262,14 @@ public class DatabricksConnector implements Source {
                     spec.put("statementId", statementId);
                     spec.put("fromChunk", group[0]);
                     spec.put("toChunk", group[1]);
+                    // The manifest counted these rows, so this chunk is not an estimate: the
+                    // warehouse has already produced the result and said how big each piece of it
+                    // is. That is what lets the engine make the batch the whole chunk instead of
+                    // falling back to whatever the destination prefers.
                     specs.add(new SplitSpec(i, spec, group[0] == group[1]
                             ? "result chunk " + group[0]
-                            : "result chunks " + group[0] + "–" + group[1]));
+                            : "result chunks " + group[0] + "–" + group[1],
+                            rowsIn(manifest, group[0], group[1])));
                 }
 
                 context.log().info("Databricks statement {} returned {} row(s) in {} result "
@@ -265,6 +280,9 @@ public class DatabricksConnector implements Source {
 
             @Override
             public RecordStream read(SplitSpec split, JsonNode fromCursor, int fetchSize) {
+                if (config.chunkMode() == DatabricksConfig.ChunkMode.OFFSET) {
+                    return new OffsetStream(session, config, context, split.spec(), fromCursor);
+                }
                 return new ResultStream(session, config, split.spec(), fromCursor);
             }
 
@@ -281,6 +299,31 @@ public class DatabricksConnector implements Source {
                 cancel(session, config, statementId(preparation.state()), context);
             }
         };
+    }
+
+    /**
+     * Rows the manifest attributes to a range of result chunks, or 0 if it does not say.
+     *
+     * <p>Zero rather than a guess. A chunk claiming a size it does not have would size the batch
+     * wrongly, and "I do not know" already has a meaning the engine handles — it falls back to the
+     * destination's preference, exactly as before this existed.
+     */
+    private static long rowsIn(JsonNode manifest, int fromChunk, int toChunk) {
+        JsonNode chunks = manifest.path("chunks");
+        if (!chunks.isArray()) {
+            return 0;
+        }
+        long rows = 0;
+        for (JsonNode chunk : chunks) {
+            int index = chunk.path("chunk_index").asInt();
+            if (index >= fromChunk && index <= toChunk) {
+                if (!chunk.hasNonNull("row_count")) {
+                    return 0;
+                }
+                rows += chunk.path("row_count").asLong(0);
+            }
+        }
+        return rows;
     }
 
     /**
@@ -360,6 +403,14 @@ public class DatabricksConnector implements Source {
         private long skip;
         private long emitted;
 
+        /**
+         * Calls made since the engine last collected them.
+         *
+         * <p>A plain list, not a concurrent queue: a stream belongs to one chunk and one thread,
+         * and the engine drains it between records rather than alongside them.
+         */
+        private final List<Source.Fetch> fetches = new ArrayList<>();
+
         ResultStream(DatabricksSession session, DatabricksConfig config, JsonNode spec,
                      JsonNode fromCursor) {
             this.session = session;
@@ -403,14 +454,33 @@ public class DatabricksConnector implements Source {
         private void fetchChunk() {
             currentChunk = nextChunk++;
 
-            JsonNode chunk = session.getJson(config.statementsUrl() + "/" + statementId
-                    + "/result/chunks/" + currentChunk, "read result chunk " + currentChunk);
+            String url = config.statementsUrl() + "/" + statementId
+                    + "/result/chunks/" + currentChunk;
+            String reason = "read result chunk " + currentChunk;
+            Instant startedAt = Instant.now();
+            JsonNode chunk;
+            try {
+                chunk = session.getJson(url, reason);
+            } catch (RuntimeException e) {
+                fetches.add(Source.Fetch.failed(reason, url, startedAt, millisSince(startedAt),
+                        e instanceof ConnectorException connector
+                                ? connector.kind().name()
+                                : e.getClass().getSimpleName(),
+                        e.getMessage()));
+                throw e;
+            }
 
             if (columns.isEmpty()) {
                 loadSchema();
             }
 
             List<JsonNode> data = rowsOf(chunk);
+
+            // One call, whatever the engine goes on to do with the rows. This is the whole reason
+            // the SPI has drainFetches: the warehouse was asked once for this many rows, and no
+            // amount of batching downstream changes that number.
+            fetches.add(Source.Fetch.ok(reason, url, startedAt, millisSince(startedAt),
+                    data.size(), 0));
 
             if (skip > 0) {
                 if (skip >= data.size()) {
@@ -455,8 +525,19 @@ public class DatabricksConnector implements Source {
                 if (url == null) {
                     continue;
                 }
+                // Reported separately, and deliberately not by its URL: a pre-signed link carries
+                // its own credential in the query string, and this string is written to a search
+                // index. The chunk it belongs to is what somebody actually needs to see.
+                Instant startedAt = Instant.now();
                 JsonNode downloaded = session.getExternal(url,
                         "read result chunk " + currentChunk + " of statement " + statementId);
+                int rows = downloaded.isArray() ? downloaded.size() : 0;
+                fetches.add(Source.Fetch.ok(
+                        "follow the external link for result chunk " + currentChunk,
+                        // Deliberately not the URL: a pre-signed link carries its own credential
+                        // in the query string, and this is written to a search index.
+                        "external link for result chunk " + currentChunk,
+                        startedAt, millisSince(startedAt), rows, 0));
                 if (downloaded.isArray()) {
                     all.addAll(toList(downloaded));
                 }
@@ -465,8 +546,16 @@ public class DatabricksConnector implements Source {
         }
 
         private void loadSchema() {
-            JsonNode schema = session.getJson(config.statementsUrl() + "/" + statementId,
-                    "read the result schema").path("manifest").path("schema").path("columns");
+            String url = config.statementsUrl() + "/" + statementId;
+            Instant startedAt = Instant.now();
+            JsonNode schema = session.getJson(url, "read the result schema")
+                    .path("manifest").path("schema").path("columns");
+            // A call that returns no rows is still a call. Left in because a schema lookup that
+            // starts taking two seconds is invisible in the read window it hides inside — and
+            // because a reader seeing two fetches against one chunk deserves to know that one of
+            // them fetched column names rather than rows.
+            fetches.add(Source.Fetch.ok("read the column names and types", url,
+                    startedAt, millisSince(startedAt), 0, 0));
 
             List<String> names = new ArrayList<>();
             List<String> typeNames = new ArrayList<>();
@@ -479,63 +568,27 @@ public class DatabricksConnector implements Source {
         }
 
         private DataRecord toRecord(JsonNode row) {
-            ObjectNode payload = Json.newObject();
-            for (int i = 0; i < columns.size(); i++) {
-                JsonNode value = i < row.size() ? row.get(i) : null;
-                String raw = value == null || value.isNull() ? null : value.asText();
-                payload.set(columns.get(i), config.typedValues()
-                        ? convert(raw, types.get(i))
-                        : Json.mapper().getNodeFactory().textNode(raw));
-            }
-
-            String key = null;
-            if (config.keyColumn() != null) {
-                JsonNode value = payload.get(config.keyColumn());
-                key = value == null || value.isNull() ? null : value.asText();
-            }
-            return DataRecord.of(payload, key, emitted);
-        }
-
-        /**
-         * Applies the column's declared type to a value.
-         *
-         * <p>JSON_ARRAY hands back every value as a string, including numbers. Passing that through
-         * would send {@code "5001.0"} where a number was meant and quietly turn every decimal into
-         * text in the destination — which is exactly the class of bug that only shows up after the
-         * migration, in the system nobody is watching.
-         *
-         * <p>{@code DECIMAL} becomes a {@code BigDecimal} rather than a double on purpose. A price
-         * or a balance that has survived the warehouse intact must not lose its last digit here.
-         *
-         * <p>An unparseable value falls back to text rather than failing. If Databricks says a
-         * column is an INT and a value is not one, the honest thing is to carry it through and let
-         * the destination refuse it by name, not to abandon a chunk of a million rows.
-         */
-        private static JsonNode convert(String raw, String typeName) {
-            var nodes = Json.mapper().getNodeFactory();
-            if (raw == null) {
-                return nodes.nullNode();
-            }
-            try {
-                return switch (typeName == null ? "STRING" : typeName.toUpperCase(Locale.ROOT)) {
-                    case "BOOLEAN" -> nodes.booleanNode(Boolean.parseBoolean(raw));
-                    case "BYTE", "SHORT", "INT", "LONG" -> nodes.numberNode(Long.parseLong(raw));
-                    case "FLOAT", "DOUBLE" -> nodes.numberNode(Double.parseDouble(raw));
-                    case "DECIMAL" -> nodes.numberNode(new BigDecimal(raw));
-                    // Complex types arrive as JSON text; parsing them keeps them addressable by a
-                    // transform script instead of arriving as an opaque blob.
-                    case "ARRAY", "MAP", "STRUCT" -> Json.mapper().readTree(raw);
-                    default -> nodes.textNode(raw);
-                };
-            } catch (Exception e) {
-                return nodes.textNode(raw);
-            }
+            return DatabricksConnector.toRecord(row, columns, types, config, emitted);
         }
 
         private static List<JsonNode> toList(JsonNode array) {
             List<JsonNode> values = new ArrayList<>(array.size());
             array.forEach(values::add);
             return values;
+        }
+
+        @Override
+        public List<Source.Fetch> drainFetches() {
+            if (fetches.isEmpty()) {
+                return List.of();
+            }
+            List<Source.Fetch> drained = List.copyOf(fetches);
+            fetches.clear();
+            return drained;
+        }
+
+        private static long millisSince(Instant startedAt) {
+            return java.time.Duration.between(startedAt, Instant.now()).toMillis();
         }
 
         @Override
@@ -550,6 +603,447 @@ public class DatabricksConnector implements Source {
         @Override
         public void close() {
             // The JDK client pools connections itself; there is nothing per-stream to release.
+        }
+    }
+
+
+
+    /**
+     * One chunk, one statement of its own.
+     *
+     * <p>Submits {@code … ORDER BY … LIMIT n OFFSET m}, waits for it, reads the rows, and is done.
+     * Nothing survives the chunk: no shared result, nothing left running on the warehouse, nothing
+     * for another chunk to depend on. A chunk retried an hour later simply runs its query again.
+     *
+     * <p>Every call it makes is reported through {@link #drainFetches()} — the submission, each
+     * poll while the warehouse is still working, and the download. That is what puts "asked three
+     * times, still PENDING, then a thousand rows" on the chunk's own timeline rather than in a
+     * server log.
+     */
+    private static final class OffsetStream implements Source.RecordStream {
+
+        private final DatabricksSession session;
+        private final DatabricksConfig config;
+        private final ConnectorContext context;
+        private final long offset;
+        private final long limit;
+        private final List<Source.Fetch> fetches = new ArrayList<>();
+
+        private List<String> columns = List.of();
+        private List<String> types = List.of();
+        private Iterator<JsonNode> rows;
+        private long emitted;
+        private String sql;
+
+        OffsetStream(DatabricksSession session, DatabricksConfig config, ConnectorContext context,
+                     JsonNode spec, JsonNode fromCursor) {
+            this.session = session;
+            this.config = config;
+            this.context = context;
+            this.offset = spec.path("offset").asLong(0);
+            this.limit = spec.path("limit").asLong(0);
+            // Rows already handed over on a previous attempt are skipped rather than re-read. The
+            // query is the same either way; only how much of it is emitted changes.
+            this.emitted = fromCursor == null ? 0 : fromCursor.path("emitted").asLong(0);
+        }
+
+        @Override
+        public DataRecord next() {
+            if (rows == null) {
+                fetch();
+            }
+            if (!rows.hasNext()) {
+                return null;
+            }
+            emitted++;
+            return toRecord(rows.next(), columns, types, config, emitted);
+        }
+
+        /** Submits this chunk's query, waits for it, and keeps the rows. */
+        private void fetch() {
+            // ORDER BY inside the subquery would be discarded by most engines; it belongs on the
+            // outer statement, where it decides what OFFSET actually means.
+            sql = "SELECT * FROM (" + config.sql() + ") ORDER BY " + config.orderBy()
+                    + " LIMIT " + limit + " OFFSET " + offset;
+
+            Instant submitted = Instant.now();
+            // The submission waits for the query, so a slice of a table that is already there
+            // comes back in this one request with its rows attached. CONTINUE rather than CANCEL:
+            // a query that outlasts the wait keeps running and is polled, instead of being thrown
+            // away and started again.
+            boolean waits = !config.waitTimeout().isZero();
+            JsonNode submitResponse;
+            String statementId;
+            try {
+                ObjectNode request = Json.newObject();
+                request.put("statement", sql);
+                request.put("warehouse_id", config.warehouseId());
+                request.put("wait_timeout", config.waitTimeout().toSeconds() + "s");
+                if (waits) {
+                    request.put("on_wait_timeout", "CONTINUE");
+                }
+                request.put("disposition", "INLINE");
+                request.put("format", "JSON_ARRAY");
+                if (config.catalog() != null) {
+                    request.put("catalog", config.catalog());
+                }
+                if (config.schema() != null) {
+                    request.put("schema", config.schema());
+                }
+                ArrayNode parameters = StatementParameters.bind(config.sql(), context.parameters());
+                if (parameters != null) {
+                    request.set("parameters", parameters);
+                }
+                submitResponse = session.postJson(config.statementsUrl(), request.toString(),
+                        "run this chunk's query");
+                statementId = submitResponse.path("statement_id").asText(null);
+            } catch (RuntimeException e) {
+                fetches.add(Source.Fetch.failed("run this chunk's query", sql, submitted,
+                        millisSince(submitted), kindOf(e), e.getMessage()));
+                throw e;
+            }
+
+            String state = submitResponse.path("status").path("state").asText("UNKNOWN")
+                    .toUpperCase(Locale.ROOT);
+            JsonNode done;
+            if ("SUCCEEDED".equals(state)) {
+                // The whole thing in one call, which is the point of the wait.
+                long rowCount = submitResponse.path("manifest").path("total_row_count").asLong(0);
+                fetches.add(Source.Fetch.ok("run this chunk's query", sql, submitted,
+                        millisSince(submitted), rowCount, 0));
+                done = submitResponse;
+            } else if (!"PENDING".equals(state) && !"RUNNING".equals(state)) {
+                String message = submitResponse.path("status").path("error").path("message")
+                        .asText("");
+                fetches.add(Source.Fetch.failed("this chunk's query ended as " + state, sql,
+                        submitted, millisSince(submitted), state, message));
+                throw new ConnectorException(ConnectorException.Kind.UNAVAILABLE,
+                        "Databricks statement " + statementId + " for this chunk ended as "
+                                + state + ": " + message);
+            } else {
+                // Outlasted the wait. It is still running, so it is polled — the behaviour a
+                // long query has always had, now reached only by long queries.
+                fetches.add(Source.Fetch.ok(
+                        waits
+                                ? "the query outlasted the " + config.waitTimeout().toSeconds()
+                                        + "s wait and is still " + state
+                                : "submitted; the query will be polled",
+                        sql, submitted, millisSince(submitted), 0, 0));
+                done = awaitReportingEachPoll(statementId);
+            }
+
+            JsonNode manifest = done.path("manifest").path("schema").path("columns");
+            List<String> names = new ArrayList<>();
+            List<String> typeNames = new ArrayList<>();
+            for (JsonNode column : manifest) {
+                names.add(column.path("name").asText());
+                typeNames.add(column.path("type_name").asText("STRING"));
+            }
+            this.columns = List.copyOf(names);
+            this.types = List.copyOf(typeNames);
+
+            List<JsonNode> data = new ArrayList<>();
+            done.path("result").path("data_array").forEach(data::add);
+            // What a resumed attempt already handed over. Skipped here rather than re-read,
+            // because the destination has them.
+            if (emitted > 0 && emitted < data.size()) {
+                data = data.subList((int) emitted, data.size());
+            } else if (emitted >= data.size()) {
+                data = List.of();
+            }
+            this.rows = data.iterator();
+        }
+
+        /** Waits for this chunk's statement, recording every question it asks. */
+        private JsonNode awaitReportingEachPoll(String statementId) {
+            Instant deadline = Instant.now().plus(config.queryTimeout());
+            String url = config.statementsUrl() + "/" + statementId;
+
+            while (true) {
+                Instant asked = Instant.now();
+                JsonNode statement = session.getJson(url, "check this chunk's query");
+                String state = statement.path("status").path("state").asText("UNKNOWN")
+                        .toUpperCase(Locale.ROOT);
+
+                if ("SUCCEEDED".equals(state)) {
+                    long rowCount = statement.path("manifest").path("total_row_count").asLong(0);
+                    fetches.add(Source.Fetch.ok("the query finished — reading its rows", url,
+                            asked, millisSince(asked), rowCount, 0));
+                    return statement;
+                }
+                if (!"PENDING".equals(state) && !"RUNNING".equals(state)) {
+                    String message = statement.path("status").path("error").path("message")
+                            .asText("");
+                    fetches.add(Source.Fetch.failed("this chunk's query ended as " + state, url,
+                            asked, millisSince(asked), state, message));
+                    throw new ConnectorException(ConnectorException.Kind.UNAVAILABLE,
+                            "Databricks statement " + statementId + " for this chunk ended as "
+                                    + state + ": " + message);
+                }
+
+                fetches.add(Source.Fetch.ok(
+                        "the query is " + state + " — the warehouse has not finished it",
+                        url, asked, millisSince(asked), 0, 0));
+
+                if (Instant.now().isAfter(deadline)) {
+                    cancel(session, config, statementId, context);
+                    throw new ConnectorException(ConnectorException.Kind.UNAVAILABLE,
+                            "This chunk's query was still " + state.toLowerCase(Locale.ROOT)
+                                    + " after " + config.queryTimeout().toSeconds()
+                                    + "s and was cancelled.");
+                }
+                try {
+                    Thread.sleep(config.pollInterval().toMillis());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new ConnectorException(ConnectorException.Kind.UNAVAILABLE,
+                            "Interrupted while waiting for this chunk's query", e);
+                }
+            }
+        }
+
+        @Override
+        public List<Source.Fetch> drainFetches() {
+            if (fetches.isEmpty()) {
+                return List.of();
+            }
+            List<Source.Fetch> drained = List.copyOf(fetches);
+            fetches.clear();
+            return drained;
+        }
+
+        @Override
+        public JsonNode cursor() {
+            ObjectNode cursor = Json.newObject();
+            cursor.put("emitted", emitted);
+            return cursor;
+        }
+
+        @Override
+        public String describe() {
+            return sql;
+        }
+
+        @Override
+        public void close() {
+        }
+
+        private static String kindOf(RuntimeException e) {
+            return e instanceof ConnectorException connector
+                    ? connector.kind().name()
+                    : e.getClass().getSimpleName();
+        }
+
+        private static long millisSince(Instant startedAt) {
+            return java.time.Duration.between(startedAt, Instant.now()).toMillis();
+        }
+    }
+
+
+    /**
+     * Applies the column's declared type to a value.
+     *
+     * <p>JSON_ARRAY hands back every value as a string, including numbers. Passing that through
+     * would send {@code "5001.0"} where a number was meant and quietly turn every decimal into
+     * text in the destination — which is exactly the class of bug that only shows up after the
+     * migration, in the system nobody is watching.
+     *
+     * <p>{@code DECIMAL} becomes a {@code BigDecimal} rather than a double on purpose. A price
+     * or a balance that has survived the warehouse intact must not lose its last digit here.
+     *
+     * <p>An unparseable value falls back to text rather than failing. If Databricks says a
+     * column is an INT and a value is not one, the honest thing is to carry it through and let
+     * the destination refuse it by name, not to abandon a chunk of a million rows.
+     */
+    private static JsonNode convertValue(String raw, String typeName) {
+        var nodes = Json.mapper().getNodeFactory();
+        if (raw == null) {
+            return nodes.nullNode();
+        }
+        try {
+            return switch (typeName == null ? "STRING" : typeName.toUpperCase(Locale.ROOT)) {
+                case "BOOLEAN" -> nodes.booleanNode(Boolean.parseBoolean(raw));
+                case "BYTE", "SHORT", "INT", "LONG" -> nodes.numberNode(Long.parseLong(raw));
+                case "FLOAT", "DOUBLE" -> nodes.numberNode(Double.parseDouble(raw));
+                case "DECIMAL" -> nodes.numberNode(new BigDecimal(raw));
+                // Complex types arrive as JSON text; parsing them keeps them addressable by a
+                // transform script instead of arriving as an opaque blob.
+                case "ARRAY", "MAP", "STRUCT" -> Json.mapper().readTree(raw);
+                default -> nodes.textNode(raw);
+            };
+        } catch (Exception e) {
+            return nodes.textNode(raw);
+        }
+    }
+
+    /**
+     * One row of a JSON_ARRAY result, as a record.
+     *
+     * <p>The wire format is positional — an array of values with no names — so the column list
+     * from the manifest is what makes it a document. Shared by both chunking modes: a row is a row
+     * whichever statement produced it.
+     */
+    private static DataRecord toRecord(JsonNode row, List<String> columns, List<String> types,
+                                       DatabricksConfig config, long seq) {
+        ObjectNode payload = Json.newObject();
+        for (int i = 0; i < columns.size(); i++) {
+            JsonNode value = i < row.size() ? row.get(i) : null;
+            String raw = value == null || value.isNull() ? null : value.asText();
+            payload.set(columns.get(i), config.typedValues()
+                    ? convertValue(raw, types.get(i))
+                    : Json.mapper().getNodeFactory().textNode(raw));
+        }
+
+        String key = null;
+        if (config.keyColumn() != null) {
+            JsonNode value = payload.get(config.keyColumn());
+            key = value == null || value.isNull() ? null : value.asText();
+        }
+        return DataRecord.of(payload, key, seq);
+    }
+
+    // ------------------------------------------------------- a statement per chunk
+
+    /**
+     * Divides the work by row offset, without leaving anything running on the warehouse.
+     *
+     * <p>One {@code COUNT(*)} to learn how many rows there are, then arithmetic. That count is a
+     * cheap aggregate rather than the migration's own query, and once it returns the warehouse is
+     * holding nothing on this run's behalf — which is the whole point of this mode. A chunk claimed
+     * an hour later runs its own query and neither knows nor cares what the others did.
+     */
+    private static List<Source.SplitSpec> planByOffset(DatabricksSession session,
+                                                       DatabricksConfig config,
+                                                       ConnectorContext context,
+                                                       Source.PlanRequest request) {
+        if (config.orderBy() == null || config.orderBy().isBlank()) {
+            throw new ConnectorException(ConnectorException.Kind.CONFIGURATION,
+                    "chunkMode OFFSET needs 'orderBy' — a column, or columns, that put the rows in "
+                            + "a total order. An OFFSET without one is not reproducible: the same "
+                            + "query may return rows in a different sequence each time it runs, so "
+                            + "two chunks could contain the same row while another row is read by "
+                            + "nobody.");
+        }
+
+        long total = runScalar(session, config, context,
+                "SELECT COUNT(*) FROM (" + config.sql() + ")", "count the rows to be migrated");
+        if (config.rowLimit() > 0) {
+            total = Math.min(total, config.rowLimit());
+        }
+        if (total <= 0) {
+            context.log().info("Databricks source matched no rows");
+            return List.of();
+        }
+
+        long perChunk = Math.max(1, request.targetRowsPerChunk());
+        // The ceiling is a safety limit, so a small chunk size raises the size rather than quietly
+        // planning a hundred thousand chunks.
+        long chunks = (total + perChunk - 1) / perChunk;
+        if (request.maxChunks() > 0 && chunks > request.maxChunks()) {
+            perChunk = (total + request.maxChunks() - 1) / request.maxChunks();
+            chunks = (total + perChunk - 1) / perChunk;
+        }
+
+        List<Source.SplitSpec> specs = new ArrayList<>((int) chunks);
+        for (int i = 0; i < chunks; i++) {
+            long offset = i * perChunk;
+            long limit = Math.min(perChunk, total - offset);
+            ObjectNode spec = Json.newObject();
+            spec.put("offset", offset);
+            spec.put("limit", limit);
+            specs.add(new Source.SplitSpec(i, spec,
+                    "rows " + offset + "–" + (offset + limit - 1), limit));
+        }
+
+        context.log().info("Databricks source has {} row(s), planned into {} chunk(s) of {} — "
+                        + "one statement each",
+                total, specs.size(), perChunk);
+        return specs;
+    }
+
+    /**
+     * Runs a statement that returns exactly one number, and waits for it.
+     *
+     * <p>Blocking, unlike the migration's own query, and deliberately: this is a count on a
+     * warehouse that is already awake, it happens once per run, and giving it the whole
+     * asynchronous apparatus would buy nothing.
+     */
+    private static long runScalar(DatabricksSession session, DatabricksConfig config,
+                                  ConnectorContext context, String sql, String purpose) {
+        ObjectNode request = Json.newObject();
+        request.put("statement", sql);
+        request.put("warehouse_id", config.warehouseId());
+        request.put("wait_timeout", "0s");
+        request.put("disposition", "INLINE");
+        request.put("format", "JSON_ARRAY");
+        if (config.catalog() != null) {
+            request.put("catalog", config.catalog());
+        }
+        if (config.schema() != null) {
+            request.put("schema", config.schema());
+        }
+        ArrayNode parameters = StatementParameters.bind(sql, context.parameters());
+        if (parameters != null) {
+            request.set("parameters", parameters);
+        }
+
+        String statementId = session.postJson(config.statementsUrl(), request.toString(), purpose)
+                .path("statement_id").asText(null);
+        if (statementId == null) {
+            throw new ConnectorException(ConnectorException.Kind.UNAVAILABLE,
+                    "Databricks accepted the statement to " + purpose + " but returned no id");
+        }
+
+        JsonNode done = awaitStatement(session, config, statementId, purpose);
+        JsonNode rows = done.path("result").path("data_array");
+        if (!rows.isArray() || rows.isEmpty() || !rows.get(0).isArray() || rows.get(0).isEmpty()) {
+            throw new ConnectorException(ConnectorException.Kind.UNAVAILABLE,
+                    "Databricks returned no value for the statement to " + purpose);
+        }
+        return Long.parseLong(rows.get(0).get(0).asText("0"));
+    }
+
+    /**
+     * Polls one statement until it succeeds, fails, or runs out of time.
+     *
+     * <p>Holds the calling thread, which is the one real cost of a statement per chunk: a chunk
+     * whose query takes ten minutes occupies a worker for ten minutes. Acceptable for queries that
+     * read data already sitting in a table — the case this mode exists for — and the reason the
+     * other mode hands its waiting to the engine instead.
+     */
+    private static JsonNode awaitStatement(DatabricksSession session, DatabricksConfig config,
+                                           String statementId, String purpose) {
+        Instant deadline = Instant.now().plus(config.queryTimeout());
+        String url = config.statementsUrl() + "/" + statementId;
+
+        while (true) {
+            JsonNode statement = session.getJson(url, purpose);
+            String state = statement.path("status").path("state").asText("UNKNOWN")
+                    .toUpperCase(Locale.ROOT);
+
+            if ("SUCCEEDED".equals(state)) {
+                return statement;
+            }
+            if (!"PENDING".equals(state) && !"RUNNING".equals(state)) {
+                JsonNode error = statement.path("status").path("error");
+                throw new ConnectorException(ConnectorException.Kind.UNAVAILABLE,
+                        "Databricks statement " + statementId + " (" + purpose + ") ended as "
+                                + state + ": " + error.path("message").asText(""));
+            }
+            if (Instant.now().isAfter(deadline)) {
+                cancel(session, config, statementId, null);
+                throw new ConnectorException(ConnectorException.Kind.UNAVAILABLE,
+                        "Databricks statement " + statementId + " (" + purpose + ") was still "
+                                + state.toLowerCase(Locale.ROOT) + " after "
+                                + config.queryTimeout().toSeconds() + "s and was cancelled.");
+            }
+            try {
+                Thread.sleep(config.pollInterval().toMillis());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new ConnectorException(ConnectorException.Kind.UNAVAILABLE,
+                        "Interrupted while waiting for Databricks statement " + statementId, e);
+            }
         }
     }
 
@@ -624,6 +1118,19 @@ public class DatabricksConnector implements Source {
         properties.set("typedValues", ConfigFields.advanced(ConfigFields.sourceField("boolean",
                 "Convert values using the result's declared column types, so numbers arrive as "
                         + "numbers rather than as strings. Defaults to true.")));
+        properties.set("chunkMode", ConfigFields.sourceEnumField(
+                "How the work is divided, and therefore how many times the query runs. "
+                        + "RESULT_CHUNKS runs the statement once and splits the result the "
+                        + "warehouse returns — exact boundaries, one query, but a shared result "
+                        + "that expires and takes every remaining chunk with it. OFFSET runs a "
+                        + "separate query per chunk: more load on the warehouse, and nothing "
+                        + "shared, so a chunk can be retried an hour later on its own.",
+                "RESULT_CHUNKS", "OFFSET"));
+        properties.set("orderBy", ConfigFields.sourceField("string",
+                "Required by chunkMode OFFSET: the column or columns that put rows in a total "
+                        + "order. An OFFSET without one is not reproducible — the same query may "
+                        + "return rows in a different order each time, so two chunks could read "
+                        + "the same row while another row is read by nobody."));
         properties.set("keyColumn", ConfigFields.recordKeyField(
                 ConfigFields.advanced(ConfigFields.sourceField("string",
                         "Column holding each record's natural key, used for indexing and upserts.")),

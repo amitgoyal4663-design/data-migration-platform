@@ -208,19 +208,21 @@ class StageLogTest {
         }
 
         @Test
-        @DisplayName("bodies are absent unless asked for, and present when they are")
-        void bodiesFollowTheSwitch() {
-            run(new StageLogPolicy(false, false, true, false));
-            assertThat(stages.entries.get(0).request())
-                    .as("customer data is not stored on a diagnostic nobody switched on")
-                    .isNull();
-
-            stages.entries.clear();
-
+        @DisplayName("a write never stores the records it carried, however bodies is set")
+        void theBatchIsNeverStoredOnTheCall() {
+            // It used to be, and the cost was out of all proportion to the answer. The batch is the
+            // records — already in the record index, one document each, searchable by any field
+            // they contain. On the call they were one opaque blob, usually over the payload cap and
+            // so stored as a truncation marker, and they crowded out the small facts a call log
+            // exists for.
             run(new StageLogPolicy(false, false, true, true));
+
             assertThat(stages.entries.get(0).request())
-                    .as("the records as they went over the wire")
-                    .hasSize(10);
+                    .as("the records are in the index, not written a second time here")
+                    .isNull();
+            assertThat(stages.entries.get(0).details().path("jobId").asText())
+                    .as("what the destination said still comes through — that is the point of the entry")
+                    .isEqualTo("job-77");
         }
     }
 
@@ -266,6 +268,127 @@ class StageLogTest {
             assertThat(write.recordsIn())
                     .as("so the destination was handed five, not ten")
                     .isEqualTo(5);
+        }
+
+        @Test
+        @DisplayName("one call buffered into two batches is one fetch and two reads")
+        void fetchIsCountedOnceHoweverManyBatchesItFills() {
+            // Ten rows pulled in a single call, handed to a destination that wants five per
+            // request. Before FETCH existed this produced two READ entries carrying the same
+            // query — indistinguishable from the query genuinely having run twice, which is what
+            // everybody reading it concluded.
+            when(connectors.source(anyString())).thenReturn(new OneCallSource(10));
+            when(connectors.sink(anyString())).thenReturn(new AcceptingSink(5));
+
+            run(new StageLogPolicy(true, false, true, false));
+
+            assertThat(stages.entries).filteredOn(e -> e.stage() == StageLogPort.Stage.FETCH)
+                    .as("the source was asked once, and only the connector could say so")
+                    .hasSize(1)
+                    .allSatisfy(fetch -> {
+                        assertThat(fetch.recordsOut()).isEqualTo(10);
+                        assertThat(fetch.query()).isEqualTo("GET /result/chunks/0");
+                        assertThat(fetch.durationMs())
+                                .as("timed by the connector, not by when the engine collected it")
+                                .isEqualTo(42);
+                    });
+
+            assertThat(stages.entries).filteredOn(e -> e.stage() == StageLogPort.Stage.READ)
+                    .as("while the engine filled two batches out of it")
+                    .hasSize(2)
+                    .extracting(StageLogPort.StageEntry::recordsIn)
+                    .containsExactly(5, 5);
+
+            assertThat(stages.entries).filteredOn(e -> e.stage() == StageLogPort.Stage.WRITE)
+                    .hasSize(2);
+        }
+
+        @Test
+        @DisplayName("the query is on the fetch that made it, not repeated on every read window")
+        void theQueryBelongsToTheCall() {
+            // One call filling two batches. The query appears once, on the call — repeating it on
+            // both read windows is what made a single call look like two.
+            when(connectors.source(anyString())).thenReturn(new OneCallSource(10));
+            when(connectors.sink(anyString())).thenReturn(new AcceptingSink(5));
+
+            run(new StageLogPolicy(true, false, true, false));
+
+            assertThat(stages.entries).filteredOn(e -> e.stage() == StageLogPort.Stage.FETCH)
+                    .extracting(StageLogPort.StageEntry::query)
+                    .containsExactly("GET /result/chunks/0");
+            assertThat(stages.entries).filteredOn(e -> e.stage() == StageLogPort.Stage.READ)
+                    .as("a read window says how much it took in, not what was asked")
+                    .allSatisfy(read -> assertThat(read.query()).isNull());
+        }
+
+        @Test
+        @DisplayName("a source that reports no calls still puts its query on the read")
+        void theQuerySurvivesForConnectorsThatReportNothing() {
+            // FixedSource implements no drainFetches, so the read window is the only place its
+            // query can appear. Losing it would remove the answer to "why did this move nothing?"
+            run(new StageLogPolicy(true, false, false, false));
+
+            assertThat(stages.entries).filteredOn(e -> e.stage() == StageLogPort.Stage.READ)
+                    .isNotEmpty()
+                    .allSatisfy(read -> assertThat(read.query())
+                            .isEqualTo("db.things.find({ tenant: 1 })"));
+        }
+
+        @Test
+        @DisplayName("a chunk that knows its size is read once, whatever the sink prefers")
+        void plannedChunkIsOneBatch() {
+            // The same ten rows and the same sink asking for five, but this time the chunk says how
+            // big it is. Its size wins: a planned range is a contract, and splitting it because the
+            // destination has a preference is what made the delivery setting a no-op.
+            when(connectors.source(anyString())).thenReturn(new OneCallSource(10));
+            when(connectors.sink(anyString())).thenReturn(new AcceptingSink(5));
+            split = Split.plan(runId, tenantId, 0, Json.emptyObject(), 10, NOW)
+                    .claim("worker-1", NOW, Duration.ofMinutes(5));
+
+            run(new StageLogPolicy(true, false, true, false));
+
+            assertThat(stages.entries).filteredOn(e -> e.stage() == StageLogPort.Stage.READ)
+                    .as("one call, one read window, and the log finally says so")
+                    .hasSize(1)
+                    .allSatisfy(read -> assertThat(read.recordsIn()).isEqualTo(10));
+        }
+
+        @Test
+        @DisplayName("a chunk that reads fewer rows than it was planned for fails")
+        void aShortfallIsNotASuccess() {
+            // The source answers an empty result for a chunk the manifest said held ten rows —
+            // a statement that expired, a warehouse that restarted. Before this the chunk read
+            // nothing, wrote nothing and completed, and the run reported success.
+            when(connectors.source(anyString())).thenReturn(new OneCallSource(0));
+            split = Split.plan(runId, tenantId, 0, Json.emptyObject(), 10, NOW)
+                    .claim("worker-1", NOW, Duration.ofMinutes(5));
+
+            assertThatThrownBy(() -> run(new StageLogPolicy(true, false, true, false)))
+                    .isInstanceOf(ChunkShortfallException.class)
+                    .hasMessageContaining("planned as 10 row(s) but read 0");
+        }
+
+        @Test
+        @DisplayName("a chunk of unknown size is not held to a count it never had")
+        void unknownSizeIsNotAShortfall() {
+            // plannedRows is 0 — a key range, an open-ended cursor, a replay. There is nothing to
+            // compare against, and inventing an expectation would fail every such chunk.
+            when(connectors.source(anyString())).thenReturn(new OneCallSource(3));
+
+            run(new StageLogPolicy(true, false, true, false));
+
+            assertThat(stages.entries).isNotEmpty();
+        }
+
+        @Test
+        @DisplayName("a connector that reports nothing still reads normally")
+        void fetchIsOptional() {
+            // FixedSource does not implement drainFetches. The point of the default is that a
+            // connector written before this existed loses one kind of entry, not the ability to run.
+            run(new StageLogPolicy(true, false, false, false));
+
+            assertThat(stages.entries).extracting(e -> e.stage().name())
+                    .containsOnly("READ");
         }
 
         @Test
@@ -327,7 +450,7 @@ class StageLogTest {
 
     private ChunkResult run(StageLogPolicy stageLogPolicy) {
         AuditPolicy audit = AuditPolicy.DEFAULT.logging(stageLogPolicy);
-        return executor.execute(pipeline(audit), split, "worker-1", () -> false);
+        return executor.execute(pipeline(audit), split, "worker-1");
     }
 
     private ResolvedPipeline pipeline(AuditPolicy audit) {
@@ -379,6 +502,17 @@ class StageLogTest {
     /** Accepts everything and reports a job id, as a bulk destination would. */
     private static final class AcceptingSink implements Sink {
 
+        /** What it asks for per request; 0 leaves the choice to the engine, as most sinks do. */
+        private final int preferredBatchSize;
+
+        AcceptingSink() {
+            this(0);
+        }
+
+        AcceptingSink(int preferredBatchSize) {
+            this.preferredBatchSize = preferredBatchSize;
+        }
+
         @Override
         public ConnectorSpec spec() {
             return null;
@@ -393,7 +527,8 @@ class StageLogTest {
             return new SinkSession() {
                 @Override
                 public Capabilities capabilities() {
-                    return new Capabilities(true, null, false, false, false, true, 0, 0);
+                    return new Capabilities(true, null, false, false, false, true, 0,
+                            preferredBatchSize);
                 }
 
                 @Override
@@ -444,6 +579,81 @@ class StageLogTest {
     }
 
     /** Emits a fixed number of records and can say what it asked for. */
+    /**
+     * A source that pulls everything in one call, then hands the rows over one at a time.
+     *
+     * <p>Which is what a warehouse result chunk, a paged API and a database cursor all do, and what
+     * makes the read log misleading: the engine only ever sees {@code next()} returning a record,
+     * so the one call and the buffering are indistinguishable to it.
+     */
+    private static final class OneCallSource implements Source {
+
+        private final int count;
+
+        OneCallSource(int count) {
+            this.count = count;
+        }
+
+        @Override
+        public ConnectorSpec spec() {
+            return null;
+        }
+
+        @Override
+        public void testConnection(ConnectorContext context) {
+        }
+
+        @Override
+        public SourceSession openSource(ConnectorContext context) {
+            return new SourceSession() {
+                @Override
+                public List<SplitSpec> plan(Preparation preparation, PlanRequest request) {
+                    return List.of(SplitSpec.single());
+                }
+
+                @Override
+                public RecordStream read(SplitSpec split, JsonNode from, int fetchSize) {
+                    return new RecordStream() {
+                        private int emitted;
+                        private final List<Fetch> fetches = new ArrayList<>();
+
+                        @Override
+                        public DataRecord next() {
+                            if (emitted == 0) {
+                                // The whole result, in one request, before a single record is
+                                // handed out.
+                                fetches.add(Fetch.ok("read result chunk 0", "GET /result/chunks/0", NOW, 42, count, 0));
+                            }
+                            if (emitted >= count) {
+                                return null;
+                            }
+                            emitted++;
+                            ObjectNode payload = Json.newObject();
+                            payload.put("n", emitted);
+                            return DataRecord.of(payload, String.valueOf(emitted), emitted);
+                        }
+
+                        @Override
+                        public List<Fetch> drainFetches() {
+                            List<Fetch> drained = List.copyOf(fetches);
+                            fetches.clear();
+                            return drained;
+                        }
+
+                        @Override
+                        public JsonNode cursor() {
+                            return Json.emptyObject();
+                        }
+
+                        @Override
+                        public void close() {
+                        }
+                    };
+                }
+            };
+        }
+    }
+
     private static final class FixedSource implements Source {
 
         private final int count;

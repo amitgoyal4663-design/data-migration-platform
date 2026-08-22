@@ -13,6 +13,8 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * An authenticated conversation with one Databricks workspace.
@@ -27,6 +29,8 @@ import java.util.Base64;
  * reported immediately rather than retried into the same answer.
  */
 final class DatabricksSession {
+
+    private static final Logger LOG = LoggerFactory.getLogger(DatabricksSession.class);
 
     private static final Duration TIMEOUT = Duration.ofMinutes(2);
 
@@ -197,8 +201,22 @@ final class DatabricksSession {
     }
 
     private HttpResponse<String> send(HttpRequest.Builder builder, String what) {
+        HttpRequest request = builder.build();
+        long startedAt = System.nanoTime();
         try {
-            return http.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response =
+                    http.send(request, HttpResponse.BodyHandlers.ofString());
+            // The one place every Databricks call passes through, so the one place worth writing
+            // it down. The engine cannot see this: it observes records arriving and nothing about
+            // the requests that produced them. Only at DEBUG, because it is a line per HTTP call
+            // and a migration makes a great many.
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("{} {} -> {} in {}ms ({})", request.method(), request.uri(),
+                        response.statusCode(),
+                        (System.nanoTime() - startedAt) / 1_000_000, what);
+                LOG.debug("      body: {}", abbreviate(response.body()));
+            }
+            return response;
         } catch (IOException e) {
             throw new ConnectorException(ConnectorException.Kind.UNAVAILABLE,
                     "Could not reach Databricks to " + what + ": " + e.getMessage(), e);
@@ -207,6 +225,14 @@ final class DatabricksSession {
             throw new ConnectorException(ConnectorException.Kind.UNAVAILABLE,
                     "Interrupted while waiting for Databricks to " + what, e);
         }
+    }
+
+    /** A response body on one line of a log. A result chunk is a megabyte; a log line is not. */
+    private static String abbreviate(String body) {
+        if (body == null || body.isEmpty()) {
+            return "—";
+        }
+        return body.length() <= 1_000 ? body : body.substring(0, 1_000) + "…";
     }
 
     private static JsonNode parse(String body) {

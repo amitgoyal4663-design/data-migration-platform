@@ -37,6 +37,13 @@ import java.util.Optional;
  *                    immediately.
  * @param dueAt       when this chunk's remote job should next be asked whether it has finished.
  *                    Only meaningful while {@code WAITING_EXTERNAL}.
+ * @param plannedRows how many rows this chunk covers, as the connector counted them at planning
+ *                    time, or 0 when it could not say. Unlike {@code spec} this is not opaque —
+ *                    it is the one thing about a chunk's contents the engine needs in its own
+ *                    right, because it decides the batch. Without it a chunk of a known thousand
+ *                    rows was written in whatever size the destination happened to prefer, and
+ *                    the log then showed the source query once per batch: two reads, two writes,
+ *                    and no way to tell that from the query having genuinely run twice.
  */
 public record Split(
         SplitId id,
@@ -55,7 +62,8 @@ public record Split(
         Instant endedAt,
         Instant updatedAt,
         JsonNode externalJob,
-        Instant dueAt) {
+        Instant dueAt,
+        long plannedRows) {
 
     private static final int MAX_ERROR_MESSAGE_LENGTH = 4_000;
 
@@ -87,9 +95,16 @@ public record Split(
         }
     }
 
-    public static Split plan(RunId runId, TenantId tenantId, int index, JsonNode spec, Instant now) {
+    /** A chunk whose size the connector knows, which is what lets its batch be the whole chunk. */
+    public static Split plan(RunId runId, TenantId tenantId, int index, JsonNode spec,
+                             long plannedRows, Instant now) {
         return new Split(SplitId.newId(), runId, tenantId, index, SplitState.PENDING, spec,
-                null, null, 0, null, null, now, null, null, now, null, null);
+                null, null, 0, null, null, now, null, null, now, null, null, plannedRows);
+    }
+
+    /** A chunk of unknown size — a key range, an open-ended cursor, a replay. */
+    public static Split plan(RunId runId, TenantId tenantId, int index, JsonNode spec, Instant now) {
+        return plan(runId, tenantId, index, spec, 0, now);
     }
 
     /**
@@ -105,7 +120,8 @@ public record Split(
         // externalJob is carried through deliberately. A chunk claimed while holding one is being
         // picked up to be settled, not re-executed, and the handle is how the executor knows that.
         return new Split(id, runId, tenantId, index, SplitState.RUNNING, spec, workerId, now.plus(lease), attempt,
-                null, null, createdAt, startedAt == null ? now : startedAt, null, now, externalJob, null);
+                null, null, createdAt, startedAt == null ? now : startedAt, null, now, externalJob, null,
+                plannedRows);
     }
 
     /**
@@ -120,7 +136,7 @@ public record Split(
     public Split parkOnExternalJob(JsonNode job, Instant nextAt, Instant now) {
         state.requireTransitionTo(SplitState.WAITING_EXTERNAL);
         return new Split(id, runId, tenantId, index, SplitState.WAITING_EXTERNAL, spec, null, null, attempt,
-                null, null, createdAt, startedAt, null, now, job, nextAt);
+                null, null, createdAt, startedAt, null, now, job, nextAt, plannedRows);
     }
 
     /** Moves the next poll without disturbing anything else. The destination is still working. */
@@ -131,7 +147,7 @@ public record Split(
                     Map.of("splitId", id.toString(), "state", state.name()));
         }
         return new Split(id, runId, tenantId, index, state, spec, assignedTo, leaseExpiresAt, attempt,
-                errorCode, errorMessage, createdAt, startedAt, endedAt, now, externalJob, nextAt);
+                errorCode, errorMessage, createdAt, startedAt, endedAt, now, externalJob, nextAt, plannedRows);
     }
 
     /**
@@ -146,7 +162,7 @@ public record Split(
     public Split externalJobFinished(Instant now) {
         state.requireTransitionTo(SplitState.PENDING);
         return new Split(id, runId, tenantId, index, SplitState.PENDING, spec, null, null, attempt,
-                null, null, createdAt, startedAt, null, now, externalJob, null);
+                null, null, createdAt, startedAt, null, now, externalJob, null, plannedRows);
     }
 
     /**
@@ -165,7 +181,7 @@ public record Split(
     public Split complete(Instant now) {
         state.requireTransitionTo(SplitState.COMPLETED);
         return new Split(id, runId, tenantId, index, SplitState.COMPLETED, spec, assignedTo, null, attempt,
-                null, null, createdAt, startedAt, now, now, externalJob, null);
+                null, null, createdAt, startedAt, now, now, externalJob, null, plannedRows);
     }
 
     public Split fail(String code, String message, Instant now) {
@@ -173,7 +189,7 @@ public record Split(
         // The handle is kept on a failure so an operator can see which remote job it was, and so
         // the reaper can tell a chunk that failed holding one from a chunk that never had one.
         return new Split(id, runId, tenantId, index, SplitState.FAILED, spec, assignedTo, null, attempt,
-                code, message, createdAt, startedAt, now, now, externalJob, null);
+                code, message, createdAt, startedAt, now, now, externalJob, null, plannedRows);
     }
 
     /**
@@ -191,19 +207,47 @@ public record Split(
         // settle path instead, where it would harvest a job that has nothing to do with the
         // records this attempt is about to move.
         return new Split(id, runId, tenantId, index, SplitState.PENDING, spec, null, null, attempt + 1,
-                errorCode, errorMessage, createdAt, null, null, now, null, null);
+                errorCode, errorMessage, createdAt, null, null, now, null, null, plannedRows);
+    }
+
+    /**
+     * Returns this chunk to the pool without having run it, to be picked up no earlier than
+     * {@code notBefore}.
+     *
+     * <p>For work that cannot start yet through no fault of its own — today, a destination whose
+     * agreed rate has been spent. The chunk read nothing, wrote nothing and holds nothing, so there
+     * is nothing to undo and nothing to resume from; it simply becomes claimable later.
+     *
+     * <p><b>The attempt counter does not move, and that is the important line.</b> A chunk that
+     * waited politely five times is not a chunk that failed five times, and counting it as one would
+     * abandon a perfectly healthy migration for honouring the limit it was told to honour. Attempts
+     * exist to stop something broken from being retried for ever; waiting for a budget is neither
+     * broken nor a retry.
+     *
+     * <p>The worker assignment is cleared, so whichever pod is free when the time comes takes it.
+     * Holding it for the pod that happened to look first would idle that pod's slot for the wait.
+     */
+    public Split deferUntil(Instant notBefore, Instant now) {
+        state.requireTransitionTo(SplitState.PENDING);
+        return new Split(id, runId, tenantId, index, SplitState.PENDING, spec, null, null, attempt,
+                errorCode, errorMessage, createdAt, null, null, now, externalJob, notBefore, plannedRows);
+    }
+
+    /** When this chunk may next be claimed, if something asked for it to be held back. */
+    public Optional<Instant> notBefore() {
+        return Optional.ofNullable(dueAt);
     }
 
     public Split abandon(Instant now) {
         state.requireTransitionTo(SplitState.ABANDONED);
         return new Split(id, runId, tenantId, index, SplitState.ABANDONED, spec, assignedTo, null, attempt,
-                errorCode, errorMessage, createdAt, startedAt, now, now, externalJob, null);
+                errorCode, errorMessage, createdAt, startedAt, now, now, externalJob, null, plannedRows);
     }
 
     public Split cancel(Instant now) {
         state.requireTransitionTo(SplitState.CANCELLED);
         return new Split(id, runId, tenantId, index, SplitState.CANCELLED, spec, assignedTo, null, attempt,
-                errorCode, errorMessage, createdAt, startedAt, now, now, externalJob, null);
+                errorCode, errorMessage, createdAt, startedAt, now, now, externalJob, null, plannedRows);
     }
 
     /**
@@ -220,7 +264,7 @@ public record Split(
                     Map.of("splitId", id.toString(), "state", state.name()));
         }
         return new Split(id, runId, tenantId, index, state, spec, assignedTo, now.plus(lease), attempt,
-                errorCode, errorMessage, createdAt, startedAt, endedAt, now, externalJob, null);
+                errorCode, errorMessage, createdAt, startedAt, endedAt, now, externalJob, null, plannedRows);
     }
 
     /**

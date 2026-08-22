@@ -47,7 +47,13 @@ public enum SplitState {
 
     private static final Map<SplitState, Set<SplitState>> TRANSITIONS = Map.of(
             PENDING, EnumSet.of(RUNNING, CANCELLED),
-            RUNNING, EnumSet.of(COMPLETED, FAILED, CANCELLED, WAITING_EXTERNAL),
+            // RUNNING to PENDING is a claim handed back by a chunk that has not started: the
+            // destination's agreed rate is spent, so there is no point holding a worker. Nothing
+            // has been read and nothing written, which is what makes it safe — and it is the whole
+            // reason the edge is narrow. A chunk that has already moved records must go through
+            // COMPLETED, FAILED or WAITING_EXTERNAL, because each of those says something true
+            // about work that happened. Only Split#deferUntil takes this edge.
+            RUNNING, EnumSet.of(COMPLETED, FAILED, CANCELLED, WAITING_EXTERNAL, PENDING),
             // Back to PENDING once the destination has finished, so an ordinary claim picks it up
             // and the chunk is settled — harvested, released, completed — by the one code path that
             // knows how to do that. Never straight to COMPLETED: the rejections the destination

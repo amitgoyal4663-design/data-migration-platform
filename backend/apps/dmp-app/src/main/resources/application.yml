@@ -57,6 +57,15 @@ spring:
       uri: ${DMP_MONGO_URI:mongodb://localhost:27017/dmp?replicaSet=rs0}
       auto-index-creation: false   # created explicitly by MongoIndexInitializer
 
+    # Holds each connector's remaining rate-limit budget, shared by every worker. Only consulted
+    # for connectors that actually carry a limit, so a deployment with none never touches it —
+    # but a deployment that has one and no Redis refuses to run that pipeline rather than sending
+    # at full speed, because a per-process counter would let each pod send the whole rate.
+    redis:
+      host: ${DMP_REDIS_HOST:localhost}
+      port: ${DMP_REDIS_PORT:6379}
+      timeout: 2s
+
   quartz:
     # The JDBC store, not the in-memory one. A schedule must survive a restart, and an in-memory
     # store also cannot coordinate replicas — every one of them would fire the same trigger.
@@ -162,11 +171,27 @@ springdoc:
 
 logging:
   pattern:
-    # tenantId and requestId come from the MDC, populated by TenantFilter, so every line
-    # emitted while handling a request is attributable without any call site passing them.
-    console: "%d{HH:mm:ss.SSS} %-5level [%X{tenantId:-—}] [%X{requestId:-—}] %logger{36} - %msg%n"
+    # All from the MDC, so no call site has to pass them. tenantId and requestId are populated by
+    # TenantFilter while a request is handled; runId, chunkId and attempt by ChunkLogContext while a
+    # chunk runs. Engine and connector lines used to carry none of these, which made a log with
+    # several chunks in flight impossible to attribute — and the attempt matters because a retried
+    # chunk logs almost exactly what its first attempt logged.
+    console: "%d{HH:mm:ss.SSS} %-5level [%X{tenantId:-—}] [%X{trace:-—}] %logger{36} - %msg%n"
   level:
     com.dmp: ${DMP_LOG_LEVEL:INFO}
+  # A second copy of every line, as JSON, for a shipper to read. Deliberately a file rather than
+  # replacing the console: a structured console makes `docker logs` unreadable for a person, and
+  # the two audiences want opposite things. Empty by default, so a plain `java -jar` writes no
+  # file and behaves exactly as before.
+  file:
+    name: ${DMP_LOG_FILE:}
+  structured:
+    format:
+      # ECS names the fields the way OpenSearch Dashboards expects — @timestamp, log.level,
+      # message — so the index is usable without mapping work. MDC entries come through as
+      # top-level fields, which is the whole point: chunkId becomes something you filter on
+      # rather than a substring to regex out of a line.
+      file: ${DMP_LOG_STRUCTURED:ecs}
 
 ---
 # -----------------------------------------------------------------------------

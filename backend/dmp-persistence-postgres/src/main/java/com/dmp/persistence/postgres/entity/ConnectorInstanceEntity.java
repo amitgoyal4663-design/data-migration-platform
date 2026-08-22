@@ -43,6 +43,16 @@ public class ConnectorInstanceEntity {
     @Column(name = "secret_refs", nullable = false)
     private JsonNode secretRefs;
 
+    /**
+     * The rate the far end agreed to, or null for no agreement.
+     *
+     * <p>Not secret and not a credential: it is a number somebody in a meeting said out loud. It
+     * belongs beside the configuration rather than in the secret store.
+     */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "rate_limit")
+    private JsonNode rateLimit;
+
     @Column(name = "status", nullable = false, length = 32)
     private String status;
 
@@ -72,12 +82,13 @@ public class ConnectorInstanceEntity {
                                    String direction, JsonNode config, JsonNode secretRefs,
                                    String status, String description, Instant lastTestedAt,
                                    String lastTestError, Instant createdAt, Instant updatedAt,
-                                   long rowVersion) {
+                                   long rowVersion, JsonNode rateLimit) {
         this.id = id;
         this.tenantId = tenantId;
         this.name = name;
         this.connectorType = connectorType;
         this.direction = direction;
+        this.rateLimit = rateLimit;
         this.config = config;
         this.secretRefs = secretRefs;
         this.status = status;
@@ -145,9 +156,13 @@ public class ConnectorInstanceEntity {
         return rowVersion;
     }
 
+    public JsonNode getRateLimit() {
+        return rateLimit;
+    }
+
     public void apply(String newName, JsonNode newConfig, JsonNode newSecretRefs, String newStatus,
                       String newDescription, Instant newLastTestedAt, String newLastTestError,
-                      Instant newUpdatedAt) {
+                      Instant newUpdatedAt, JsonNode newRateLimit) {
         this.name = newName;
         this.config = newConfig;
         this.secretRefs = newSecretRefs;
@@ -156,5 +171,6 @@ public class ConnectorInstanceEntity {
         this.lastTestedAt = newLastTestedAt;
         this.lastTestError = newLastTestError;
         this.updatedAt = newUpdatedAt;
+        this.rateLimit = newRateLimit;
     }
 }

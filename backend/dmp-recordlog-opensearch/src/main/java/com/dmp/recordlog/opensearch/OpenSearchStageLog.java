@@ -88,6 +88,7 @@ public class OpenSearchStageLog implements StageLogPort {
                 "nodeName":      { "type": "keyword" },
                 "connectorType": { "type": "keyword" },
                 "sequence":      { "type": "integer" },
+                "position":      { "type": "integer" },
                 "attempt":       { "type": "integer" },
                 "recordsIn":     { "type": "integer" },
                 "recordsOut":    { "type": "integer" },
@@ -165,7 +166,10 @@ public class OpenSearchStageLog implements StageLogPort {
         // sequence matters because a fast chunk can put several stages in the same millisecond.
         ArrayNode sort = body.putArray("sort");
         sort.addObject().putObject("occurredAt").put("order", "asc");
-        sort.addObject().putObject("sequence").put("order", "asc");
+        // Position, not sequence. Sequence counts within a stage, so using it here interleaved
+        // the stages of any chunk fast enough to put several in one millisecond — a fetch sorted
+        // after the read it fed, and the log read as fetch, read, fetch.
+        sort.addObject().putObject("position").put("order", "asc");
         body.put("track_total_hits", true);
 
         HttpResponse<String> response = send(HttpRequest
@@ -246,6 +250,7 @@ public class OpenSearchStageLog implements StageLogPort {
         document.put("nodeName", entry.nodeName());
         document.put("connectorType", entry.connectorType());
         document.put("sequence", entry.sequence());
+        document.put("position", entry.position());
         document.put("attempt", entry.attempt());
         document.put("recordsIn", entry.recordsIn());
         document.put("recordsOut", entry.recordsOut());
@@ -310,6 +315,7 @@ public class OpenSearchStageLog implements StageLogPort {
                     text(s, "nodeName"),
                     text(s, "connectorType"),
                     s.path("sequence").asInt(),
+                    s.path("position").asInt(),
                     s.path("attempt").asInt(),
                     s.path("recordsIn").asInt(),
                     s.path("recordsOut").asInt(),

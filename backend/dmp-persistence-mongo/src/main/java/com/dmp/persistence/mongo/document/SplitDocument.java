@@ -41,6 +41,16 @@ public class SplitDocument {
     @Field("spec")
     private Map<String, Object> spec;
 
+    /**
+     * Rows this chunk covers, as counted at planning time; 0 when the source could not say.
+     *
+     * <p>A {@code long} rather than a boxed type so a document written before this field existed
+     * reads back as 0, which is precisely the value that means "unknown" — no migration, no
+     * backfill, and no behaviour change for anything already planned.
+     */
+    @Field("plannedRows")
+    private long plannedRows;
+
     /** Worker holding this split. Retained after failure so orphans are attributable. */
     @Field("assignedTo")
     private String assignedTo;
@@ -150,6 +160,14 @@ public class SplitDocument {
 
     public void setSpec(Map<String, Object> spec) {
         this.spec = spec;
+    }
+
+    public long getPlannedRows() {
+        return plannedRows;
+    }
+
+    public void setPlannedRows(long plannedRows) {
+        this.plannedRows = plannedRows;
     }
 
     public String getAssignedTo() {

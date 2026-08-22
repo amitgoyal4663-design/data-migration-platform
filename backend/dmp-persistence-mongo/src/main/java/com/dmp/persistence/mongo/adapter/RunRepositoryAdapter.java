@@ -225,6 +225,41 @@ public class RunRepositoryAdapter implements RunRepository {
                 update, RunDocument.class);
     }
 
+    /**
+     * Every attempt descending from the given migrations, gathered a generation at a time.
+     *
+     * <p>A loop rather than a graph query because chains are short — a migration resumed more than
+     * a handful of times is remarkable — and because it keeps the store free of anything Mongo
+     * specific. Bounded so a cycle in the data, which nothing should be able to create, cannot spin
+     * here for ever.
+     */
+    @Override
+    public List<Run> findAttemptsOf(TenantId tenantId, java.util.Collection<RunId> roots) {
+        List<Run> found = new java.util.ArrayList<>();
+        java.util.Set<java.util.UUID> frontier = roots.stream()
+                .map(RunId::value).collect(java.util.stream.Collectors.toSet());
+        java.util.Set<java.util.UUID> seen = new java.util.HashSet<>(frontier);
+
+        for (int generation = 0; generation < MAX_CHAIN_DEPTH && !frontier.isEmpty(); generation++) {
+            Query query = scoped(tenantId)
+                    .addCriteria(Criteria.where("retryOf").in(frontier));
+
+            List<Run> children = mongo.find(query, RunDocument.class).stream()
+                    .map(RunMapper::toDomain)
+                    .filter(run -> seen.add(run.id().value()))
+                    .toList();
+
+            found.addAll(children);
+            frontier = children.stream()
+                    .map(run -> run.id().value())
+                    .collect(java.util.stream.Collectors.toSet());
+        }
+        return found;
+    }
+
+    /** Deep enough for any real chain, shallow enough that malformed data cannot loop. */
+    private static final int MAX_CHAIN_DEPTH = 20;
+
     @Override
     public Page<Run> search(TenantId tenantId, RunSearch criteria, PageQuery pageQuery) {
         Query query = scoped(tenantId);
@@ -238,6 +273,14 @@ public class RunRepositoryAdapter implements RunRepository {
         }
         if (criteria.triggeredBy() != null) {
             query.addCriteria(Criteria.where("triggeredBy").is(criteria.triggeredBy()));
+        }
+        if (criteria.rootsOnly()) {
+            // A run with no parent is a migration in its own right. Absent and null are both
+            // "no parent": the field did not exist before retries did, and every run stored until
+            // then has no value for it.
+            query.addCriteria(new Criteria().orOperator(
+                    Criteria.where("retryOf").exists(false),
+                    Criteria.where("retryOf").is(null)));
         }
         if (criteria.startedAfter() != null || criteria.startedBefore() != null) {
             Criteria started = Criteria.where("startedAt");

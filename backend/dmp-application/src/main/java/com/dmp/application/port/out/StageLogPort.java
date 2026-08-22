@@ -62,9 +62,10 @@ public interface StageLogPort {
      *                   reuses the trace it had, and so narrowing to a chunk is a prefix match.
      *                   The record index stamps the same value, which is what lets a cycle be
      *                   shown as one story instead of two unrelated lists
-     * @param stage      READ, TRANSFORM or WRITE
+     * @param stage      FETCH, READ, TRANSFORM or WRITE
      * @param nodeId     which node on the canvas, so a pipeline with two transforms is unambiguous
-     * @param sequence   position within the chunk for this stage, from 0
+     * @param sequence   position within the chunk for this stage, from 0 — the third read, the
+     *                   third write. Not an ordering across stages; see {@code position}
      * @param attempt    the chunk's attempt, so a retry's entries are distinguishable
      * @param recordsIn  how many records went in
      * @param recordsOut how many came out. Differs from {@code recordsIn} only at TRANSFORM, where
@@ -91,6 +92,17 @@ public interface StageLogPort {
             String nodeName,
             String connectorType,
             int sequence,
+            /**
+             * Where this entry falls among <em>all</em> of its chunk's entries, counting from the
+             * chunk's first.
+             *
+             * <p>Distinct from {@code sequence}, which counts within one stage — the third read,
+             * the third write. That makes it useless for ordering the log: a fetch and a read that
+             * happen in the same millisecond are both "0", and the fetch that follows them is "1",
+             * so sorting by it put a fetch <em>after</em> the read it fed. Timestamps alone cannot
+             * separate them either; several stages of a fast chunk land in one millisecond.
+             */
+            int position,
             int attempt,
             int recordsIn,
             int recordsOut,
@@ -114,8 +126,17 @@ public interface StageLogPort {
         }
     }
 
-    /** The three things a chunk does. */
+    /** The things a chunk does. */
     enum Stage {
+        /**
+         * One real call to the source: a statement executed, a page pulled, a link followed.
+         *
+         * <p>Reported by the connector, because nothing else can see it. {@link #READ} is the
+         * engine's unit and this is the source's, and a developer needs both: FETCH 1 alongside
+         * READ 2 says one call was buffered into two batches, where two READ entries carrying the
+         * same query say — wrongly, and to everyone who reads them — that the query ran twice.
+         */
+        FETCH,
         /** Rows pulled from the source. */
         READ,
         /** Scripts applied to them, which may drop records or turn one into several. */

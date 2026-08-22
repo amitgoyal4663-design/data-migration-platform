@@ -34,6 +34,9 @@ record DatabricksConfig(
         Duration pollInterval,
         Disposition disposition,
         String keyColumn,
+        ChunkMode chunkMode,
+        String orderBy,
+        Duration waitTimeout,
         long rowLimit,
         boolean typedValues,
         Auth auth) {
@@ -98,9 +101,85 @@ record DatabricksConfig(
                 seconds(config, "pollSeconds", 5, 1),
                 parseDisposition(text(config, "disposition", "EXTERNAL_LINKS")),
                 text(config, "keyColumn", null),
+                parseChunkMode(text(config, "chunkMode", "RESULT_CHUNKS")),
+                text(config, "orderBy", null),
+                waitTimeout(config),
                 Math.max(0, config.path("rowLimit").asLong(0)),
                 config.path("typedValues").asBoolean(true),
                 parseAuth(text(config, "authMethod", "TOKEN")));
+    }
+
+    /**
+     * How the work is divided, and therefore how many times the query runs.
+     *
+     * <p>The two are genuinely different trades rather than one being better.
+     */
+    enum ChunkMode {
+        /**
+         * One statement for the whole run, split by the manifest the warehouse returns.
+         *
+         * <p>The query runs once. The division is exact — the manifest states the row count of
+         * every piece — so no counting, no key column and no guessing, and chunks cannot come out
+         * uneven on skewed data. The cost is a shared, perishable result: the warehouse holds it,
+         * and when it stops holding it every remaining chunk fails together.
+         */
+        RESULT_CHUNKS,
+        /**
+         * A statement per chunk, each fetching its own slice by row offset.
+         *
+         * <p>The query runs once per chunk, which a warehouse charges for. In return nothing is
+         * shared and nothing perishes: a chunk can be retried an hour later and simply re-runs its
+         * own query, and a chunk that fails takes no other chunk with it. For a table that is
+         * already sitting there — not a computed result somebody is waiting on — that is usually
+         * the better trade, and it is the shape most existing migration jobs already have.
+         *
+         * <p>Needs {@code orderBy}. An OFFSET without a total order is meaningless: the same query
+         * may return rows in a different sequence on each run, so chunk 3 and chunk 4 could both
+         * contain a row, and some other row nothing at all.
+         */
+        OFFSET
+    }
+
+    /**
+     * How long the submit call itself waits for the query before giving up and returning an id.
+     *
+     * <p>Thirty seconds by default, which turns the common case into a single request: a query that
+     * reads a slice of a table already sitting there usually finishes well inside it, and the
+     * workspace then answers the submission with the rows attached. A query that does not finish
+     * returns an id and is polled exactly as before, so a slow query costs what it always did.
+     *
+     * <p>Zero disables the wait entirely and makes every submission asynchronous. That is the right
+     * setting for a single statement covering a whole run — an hour-long query has nothing to gain
+     * from a thirty-second wait and a worker would be held for it.
+     *
+     * <p>Databricks accepts {@code 0s} or a value from {@code 5s} to {@code 50s} and refuses
+     * anything between, which is a rule worth enforcing here rather than discovering as a 400 on
+     * the first run.
+     */
+    private static Duration waitTimeout(JsonNode config) {
+        long seconds = config.path("waitTimeoutSeconds").asLong(30);
+        if (seconds == 0) {
+            return Duration.ZERO;
+        }
+        if (seconds < 5 || seconds > 50) {
+            throw new ConnectorException(ConnectorException.Kind.CONFIGURATION,
+                    "waitTimeoutSeconds must be 0, or between 5 and 50 — Databricks refuses "
+                            + "anything else. 0 submits the query and polls for it; 5 to 50 lets "
+                            + "the submission itself wait, so a query that finishes in time comes "
+                            + "back in one request with its rows.");
+        }
+        return Duration.ofSeconds(seconds);
+    }
+
+    static ChunkMode parseChunkMode(String value) {
+        try {
+            return ChunkMode.valueOf(value.trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (RuntimeException e) {
+            throw new ConnectorException(ConnectorException.Kind.CONFIGURATION,
+                    "Unknown chunkMode '" + value + "'. Use RESULT_CHUNKS to run the query once and "
+                            + "split the result the warehouse returns, or OFFSET to run a separate "
+                            + "query per chunk.");
+        }
     }
 
     /** The statements endpoint, e.g. {@code https://host/api/2.0/sql/statements}. */

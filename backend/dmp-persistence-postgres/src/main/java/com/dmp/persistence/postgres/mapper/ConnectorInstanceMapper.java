@@ -28,7 +28,8 @@ public final class ConnectorInstanceMapper {
                 entity.getLastTestError(),
                 entity.getCreatedAt(),
                 entity.getUpdatedAt(),
-                entity.getRowVersion());
+                entity.getRowVersion(),
+                RateLimitPolicyJson.fromJson(entity.getRateLimit()));
     }
 
     public static ConnectorInstanceEntity toEntity(ConnectorInstance domain) {
@@ -46,7 +47,8 @@ public final class ConnectorInstanceMapper {
                 domain.lastTestError(),
                 domain.createdAt(),
                 domain.updatedAt(),
-                domain.rowVersion());
+                domain.rowVersion(),
+                RateLimitPolicyJson.toJson(domain.rateLimit()));
     }
 
     public static void applyTo(ConnectorInstanceEntity entity, ConnectorInstance domain) {
@@ -58,6 +60,7 @@ public final class ConnectorInstanceMapper {
                 domain.description(),
                 domain.lastTestedAt(),
                 domain.lastTestError(),
-                domain.updatedAt());
+                domain.updatedAt(),
+                RateLimitPolicyJson.toJson(domain.rateLimit()));
     }
 }

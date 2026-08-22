@@ -33,11 +33,31 @@ public final class RecordSearchDtos {
             @Schema(description = "Which output of that record this was, from 0. Above zero only "
                     + "where a transform turned one record into several.")
             int ordinal,
-            @Schema(description = "WRITTEN, REJECTED or FILTERED. FILTERED means a transform "
-                    + "dropped it on purpose, which is a success rather than a loss.")
+            @Schema(description = "WRITTEN, SENT, REJECTED, FILTERED or TRANSFORM_FAILED. FILTERED "
+                    + "means a transform dropped it on purpose, which is a success rather than a "
+                    + "loss; TRANSFORM_FAILED means a script threw on it, which is not.")
             String outcome,
             @Schema(description = "The destination's own code when it refused the record")
             String errorCode,
+
+            @Schema(description = "The record as the platform handled it, redacted and size-capped "
+                    + "by the pipeline's audit policy. Null when that policy does not index "
+                    + "payloads — which is a policy decision, not a missing record.",
+                    nullable = true)
+            com.fasterxml.jackson.databind.JsonNode payload,
+
+            @Schema(description = "The record as the source produced it, when a transform changed "
+                    + "it. Null when nothing changed it — the platform does not store an identical "
+                    + "copy beside every record.",
+                    nullable = true)
+            com.fasterxml.jackson.databind.JsonNode sourcePayload,
+
+            @Schema(description = "What the destination or the script actually said. For a failed "
+                    + "transform this is the exception's own message, which is the difference "
+                    + "between knowing it failed and knowing why.",
+                    nullable = true)
+            String errorMessage,
+
             Instant occurredAt) {
 
         public static Response from(RecordIndexPort.RecordIndexEntry entry) {
@@ -51,6 +71,9 @@ public final class RecordSearchDtos {
                     entry.ordinal(),
                     entry.outcome().name(),
                     entry.errorCode(),
+                    entry.payload(),
+                    entry.sourcePayload(),
+                    entry.errorMessage(),
                     entry.occurredAt());
         }
     }

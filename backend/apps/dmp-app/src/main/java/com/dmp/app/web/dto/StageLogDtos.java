@@ -22,13 +22,18 @@ public final class StageLogDtos {
                     + "Formatted <chunkId>#<cycle>. Every record the cycle carried is stamped "
                     + "with the same value, which is what joins this log to the record index.")
             String traceId,
-            @Schema(description = "READ, TRANSFORM or WRITE")
+            @Schema(description = "FETCH, READ, TRANSFORM or WRITE")
             String stage,
             String nodeId,
             String nodeName,
             String connectorType,
-            @Schema(description = "Position within the chunk for this stage, from 0")
+            @Schema(description = "Position within the chunk for this stage alone — the third "
+                    + "read, the third write. Not comparable across stages.")
             int sequence,
+            @Schema(description = "Position among all of this chunk's entries, and what the log is "
+                    + "ordered by. Sorting on sequence interleaved the stages of a chunk fast "
+                    + "enough to put several in one millisecond.")
+            int position,
             @Schema(description = "The chunk's attempt, so a retry's entries are distinguishable")
             int attempt,
             int recordsIn,
@@ -70,6 +75,7 @@ public final class StageLogDtos {
                     entry.nodeName(),
                     entry.connectorType(),
                     entry.sequence(),
+                    entry.position(),
                     entry.attempt(),
                     entry.recordsIn(),
                     entry.recordsOut(),

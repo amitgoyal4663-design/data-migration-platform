@@ -119,11 +119,18 @@ public class RunController {
     }
 
     @GetMapping("/runs")
-    @Operation(summary = "Search runs, newest first")
+    @Operation(summary = "Search runs, newest first",
+            description = "One entry per migration by default, with any resumes or retries of it "
+                    + "nested in `attempts`. A page size therefore counts migrations, which is "
+                    + "what somebody choosing \"25 per page\" means: a run stopped and resumed "
+                    + "three times is one migration and four rows in the store, and paging by "
+                    + "rows made the chosen number describe nothing anybody could see. Pass "
+                    + "grouped=false for the flat list, where every attempt is its own entry.")
     public PageResponse<RunDtos.Response> search(
             @RequestParam(required = false) String pipelineId,
             @Parameter(description = "Repeatable, for example ?state=RUNNING&state=FAILED")
             @RequestParam(required = false) Set<RunState> state,
+            @RequestParam(defaultValue = "true") boolean grouped,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "25") int size) {
 
@@ -132,8 +139,25 @@ public class RunController {
                 state == null ? Set.of() : state,
                 null, null, null);
 
-        var result = runs.search(tenantContext.currentTenant(), criteria, PageQuery.of(page, size));
-        return PageResponse.from(result, run -> RunDtos.Response.from(run, clock.instant()));
+        var tenantId = tenantContext.currentTenant();
+        var result = runs.search(tenantId, grouped ? criteria.onlyRoots() : criteria,
+                PageQuery.of(page, size));
+
+        if (!grouped) {
+            return PageResponse.from(result, run -> RunDtos.Response.from(run, clock.instant()));
+        }
+
+        // One query for the whole page's attempts rather than one per row: a list of twenty-five
+        // would otherwise be twenty-five round trips to show something most rows do not have.
+        var byParent = runs
+                .findAttemptsOf(tenantId, result.content().stream()
+                        .map(com.dmp.domain.run.Run::id).toList())
+                .stream()
+                .collect(java.util.stream.Collectors.groupingBy(
+                        run -> run.retryOf().toString()));
+
+        return PageResponse.from(result,
+                run -> RunDtos.Response.withAttempts(run, byParent, clock.instant()));
     }
 
     @GetMapping("/runs/{runId}/chunks")

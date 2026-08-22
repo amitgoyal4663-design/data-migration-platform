@@ -77,12 +77,28 @@ public class WorkerLoop {
     private final ChunkExecutor executor;
     private final RunEventPublisher events;
     private final com.dmp.engine.schedule.ExternalJobScheduler externalJobs;
+    private final RateLimitGate rateLimits;
     private final Clock clock;
 
     private final String workerId;
     private final int maxConcurrentChunks;
     private final Duration idlePollInterval;
     private final Duration busyPollInterval;
+
+    /**
+     * When the soonest chunk this pod deferred becomes claimable again.
+     *
+     * <p>Without it, the idle backoff and a rate limit work against each other. The backoff doubles
+     * its sleep while nothing is claimable — up to fifteen seconds — and a chunk waiting six
+     * seconds for its budget is not claimable, so the pod is asleep when the budget arrives. The
+     * result is a run that goes at less than half the rate the client actually allowed, with the
+     * limiter behaving perfectly and the engine sitting on its hands.
+     *
+     * <p>Only what this pod deferred, which is enough: another pod polls on its own schedule, and
+     * the value is a hint that shortens a sleep, never a substitute for the claim itself.
+     */
+    private final java.util.concurrent.atomic.AtomicReference<Instant> nextDeferredDueAt =
+            new java.util.concurrent.atomic.AtomicReference<>();
 
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicInteger inFlight = new AtomicInteger();
@@ -106,6 +122,8 @@ public class WorkerLoop {
                       ChunkExecutor executor,
                       RunEventPublisher events,
                       com.dmp.engine.schedule.ExternalJobScheduler externalJobs,
+                      com.dmp.application.port.out.RateLimiter rateLimiter,
+                      com.dmp.connector.runtime.ConnectorRegistry connectors,
                       Clock clock,
                       @Value("${dmp.worker.id:}") String configuredWorkerId,
                       @Value("${dmp.worker.max-concurrent-chunks:4}") int maxConcurrentChunks,
@@ -119,6 +137,7 @@ public class WorkerLoop {
         this.executor = executor;
         this.events = events;
         this.externalJobs = externalJobs;
+        this.rateLimits = new RateLimitGate(rateLimiter, connectors);
         this.clock = clock;
         this.workerId = configuredWorkerId == null || configuredWorkerId.isBlank()
                 ? defaultWorkerId() : configuredWorkerId;
@@ -204,6 +223,8 @@ public class WorkerLoop {
                 wait = idleMillis;
                 idleMillis = Math.min(idleMillis * 2, MAX_IDLE_POLL.toMillis());
             }
+
+            wait = Math.min(wait, millisUntilDeferredWorkIsDue());
 
             try {
                 Thread.sleep(wait);
@@ -320,11 +341,30 @@ public class WorkerLoop {
     }
 
     private void runChunk(Run run, Split split) {
+        // Everything logged from here down — by the engine, by a transform, by a connector talking
+        // to a warehouse — carries this chunk's id. Without it a connector's "job 750bm… refused
+        // 200 records" was attributable to no chunk at all, and with several chunks in flight the
+        // log could not be read.
+        try (ChunkLogContext ignored = ChunkLogContext.of(split)) {
+            runChunkLogged(run, split);
+        }
+    }
+
+    private void runChunkLogged(Run run, Split split) {
         ResolvedPipeline pipeline = planner.resolve(run);
         Instant now = clock.instant();
 
         try {
-            ChunkResult result = executor.execute(pipeline, split, workerId, this::stopRequested);
+            // Before anything is opened, read or sent: may this chunk spend what a client agreed
+            // to? A chunk that cannot is put back with a time on it, having done nothing, and this
+            // worker goes and finds another run rather than sitting on a slot waiting.
+            Optional<Duration> holdFor = rateLimits.reserve(pipeline, split.hasExternalJob());
+            if (holdFor.isPresent()) {
+                defer(run, split, holdFor.get());
+                return;
+            }
+
+            ChunkResult result = executor.execute(pipeline, split, workerId);
 
             // Before this chunk is marked complete, not after. Completion is what triggers the
             // run-finished check, and a run whose only chunk had just completed would be declared
@@ -332,6 +372,11 @@ public class WorkerLoop {
             if (!result.sourceExhausted() && !stopRequested()) {
                 generateNextChunk(run, split);
             }
+
+            // What the reservation at the door assumed, minus what the chunk turned out to need.
+            // Before completion, so the budget is available to whichever chunk is claimed next
+            // rather than a moment after it has already been refused.
+            rateLimits.settle(pipeline, result);
 
             splits.transitionState(split.tenantId(), split.id(), SplitState.RUNNING,
                     split.complete(clock.instant()));
@@ -369,6 +414,61 @@ public class WorkerLoop {
             runs.releaseSlot(run.tenantId(), run.id());
             runs.findById(run.tenantId(), run.id()).ifPresent(orchestrator::completeIfFinished);
         }
+    }
+
+    /**
+     * How long until the soonest chunk this pod deferred can run, or the sleep it was going to take.
+     *
+     * <p>Clears the hint once it has passed, so a stale time cannot hold the loop at a busy poll
+     * for ever. A lost hint costs one ordinary poll interval, which is why it is allowed to be
+     * approximate.
+     */
+    private long millisUntilDeferredWorkIsDue() {
+        Instant due = nextDeferredDueAt.get();
+        if (due == null) {
+            return Long.MAX_VALUE;
+        }
+        long remaining = java.time.Duration.between(clock.instant(), due).toMillis();
+        if (remaining <= 0) {
+            nextDeferredDueAt.compareAndSet(due, null);
+            return busyPollInterval.toMillis();
+        }
+        return remaining;
+    }
+
+    /**
+     * Puts a chunk back, unrun, to be claimed no earlier than the given wait.
+     *
+     * <p>Distinct from {@link #park} in what it is waiting for and in what it has already done.
+     * A parked chunk has handed records to a destination that is still deciding; a deferred chunk
+     * has not started. Distinct from {@link Split#scheduleRetry} in that nothing went wrong — so
+     * the attempt counter does not move, and a chunk that waits ten times for a budget is not ten
+     * failures away from being abandoned.
+     */
+    private void defer(Run run, Split split, Duration holdFor) {
+        Instant now = clock.instant();
+        Instant until = now.plus(holdFor);
+
+        Split deferred = splits.transitionState(split.tenantId(), split.id(), SplitState.RUNNING,
+                split.deferUntil(until, now)).orElse(null);
+
+        if (deferred == null) {
+            // Another pod holds it now. Nothing was read or written, so there is nothing to undo
+            // and nothing to warn about: that pod will ask for the same budget and get the same
+            // answer.
+            log.debug("Chunk {} of run {} was reclaimed before it could be held back",
+                    split.index(), run.id());
+            return;
+        }
+
+        // So the poller does not doze past the moment this becomes claimable. Earliest wins: two
+        // chunks deferred by different amounts should wake the loop for the nearer one.
+        nextDeferredDueAt.accumulateAndGet(until,
+                (existing, candidate) -> existing == null || candidate.isBefore(existing)
+                        ? candidate : existing);
+
+        log.info("Chunk {} of run {} is waiting for the rate limit; claimable again at {}",
+                split.index(), run.id(), until);
     }
 
     /**
@@ -450,10 +550,16 @@ public class WorkerLoop {
      * <p>A rejection-threshold failure is never retried. The rejections that reach a threshold are
      * systematic — a schema that changed, a key that already exists everywhere — and re-sending the
      * same records produces the same rejections, at whatever the target charges for the attempt.
+     *
+     * <p>A {@link DmpException} carries the answer in its own error code and is asked for it. That
+     * it was not is how a chunk needing 167 calls against a limit of 5 was attempted five times: a
+     * configuration that cannot work does not become workable by being tried again, and each
+     * attempt buried the message explaining what to change under four more copies of itself.
      */
     static boolean isRetryable(Throwable cause) {
         return switch (cause) {
             case com.dmp.connector.api.ConnectorException e -> e.isRetryable();
+            case com.dmp.common.error.DmpException e -> e.errorCode().isRetryable();
             case RejectionThresholdExceededException ignored -> false;
             case null -> true;
             default -> true;
@@ -464,6 +570,7 @@ public class WorkerLoop {
     static String errorCodeFor(Throwable cause) {
         return switch (cause) {
             case com.dmp.connector.api.ConnectorException e -> e.kind().name();
+            case com.dmp.common.error.DmpException e -> e.errorCode().name();
             case RejectionThresholdExceededException ignored -> "REJECTION_THRESHOLD_EXCEEDED";
             case null -> "CHUNK_FAILED";
             default -> "CHUNK_FAILED";

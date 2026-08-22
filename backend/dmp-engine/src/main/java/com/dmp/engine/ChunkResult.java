@@ -11,6 +11,9 @@ package com.dmp.engine;
  *                         dead-letter queue
  * @param recordsFiltered  records a transform deliberately dropped
  * @param bytesRead        approximate, for throughput metrics
+ * @param sinkCalls        requests actually made of the destination. Known only once the batches
+ *                         have been grouped and written, which is why a rate limit reserves a
+ *                         pessimistic number up front and reconciles against this afterwards
  * @param batchesCommitted number of checkpoint advances
  * @param sourceExhausted  whether the source ran out, as opposed to the chunk stopping because it
  *                         had read its allotted rows. Only meaningful for an open-ended chunk,
@@ -24,11 +27,22 @@ public record ChunkResult(
         long recordsFailed,
         long recordsFiltered,
         long bytesRead,
+        long sinkCalls,
         int batchesCommitted,
         boolean sourceExhausted) {
 
+    /**
+     * The shape before call counting, for the many places that build a result without making calls.
+     */
+    public ChunkResult(long recordsRead, long recordsProduced, long recordsWritten,
+                       long recordsFailed, long recordsFiltered, long bytesRead,
+                       int batchesCommitted, boolean sourceExhausted) {
+        this(recordsRead, recordsProduced, recordsWritten, recordsFailed, recordsFiltered,
+                bytesRead, 0, batchesCommitted, sourceExhausted);
+    }
+
     public static ChunkResult empty() {
-        return new ChunkResult(0, 0, 0, 0, 0, 0, 0, true);
+        return new ChunkResult(0, 0, 0, 0, 0, 0, 0, 0, true);
     }
 
     /**

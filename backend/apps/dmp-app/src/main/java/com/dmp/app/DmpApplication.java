@@ -30,6 +30,7 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
         "com.dmp.connector.runtime",
         "com.dmp.engine",
         "com.dmp.recordlog",
+        "com.dmp.ratelimit",
         "com.dmp.events",
         "com.dmp.transform"
 })

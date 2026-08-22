@@ -178,7 +178,7 @@ class RejectionReasonTest {
     // ------------------------------------------------------------------ setup
 
     private ChunkResult run(AuditPolicy audit) {
-        return executor.execute(pipeline(audit), split, "worker-1", () -> false);
+        return executor.execute(pipeline(audit), split, "worker-1");
     }
 
     private ResolvedPipeline pipeline(AuditPolicy audit) {

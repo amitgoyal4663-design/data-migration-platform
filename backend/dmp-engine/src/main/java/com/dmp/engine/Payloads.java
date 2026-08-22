@@ -31,6 +31,22 @@ public final class Payloads {
      *
      * @param maxBytes ceiling on the serialised form; {@code 0} keeps the payload whatever its size
      */
+    /**
+     * A payload as one line of a log, cut to a length a log can carry.
+     *
+     * <p>Distinct from {@link #truncate}, which produces a JSON document for a store and marks
+     * what it removed so a reader knows the document is partial. This produces a string for a
+     * human reading a terminal, where the honest signal is an ellipsis and the priority is that
+     * one event stays one line.
+     */
+    public static String abbreviate(JsonNode payload, int maxChars) {
+        if (payload == null || payload.isNull()) {
+            return "—";
+        }
+        String text = payload.toString();
+        return text.length() <= maxChars ? text : text.substring(0, maxChars) + "…";
+    }
+
     public static JsonNode truncate(JsonNode payload, int maxBytes) {
         if (payload == null || payload.isNull() || maxBytes <= 0) {
             return payload;

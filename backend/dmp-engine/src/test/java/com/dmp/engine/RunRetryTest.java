@@ -10,6 +10,8 @@ import com.dmp.application.port.out.RunRepository;
 import com.dmp.application.port.out.SplitRepository;
 import com.dmp.common.error.DmpException;
 import com.dmp.common.json.Json;
+import com.dmp.domain.run.SplitState;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.dmp.domain.pipeline.PipelineId;
 import com.dmp.domain.pipeline.PipelineMode;
 import com.dmp.domain.pipeline.PipelineVersionId;
@@ -41,6 +43,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -197,6 +200,43 @@ class RunRetryTest {
         assertThat(copied.getValue().splitId()).isNotEqualTo(abandoned.id());
         assertThat(copied.getValue().lastSeq()).isEqualTo(9_000);
         assertThat(copied.getValue().recordsWritten()).isEqualTo(9_000);
+    }
+
+    @Test
+    @DisplayName("a chunk that never started still carries where it was going to start")
+    void seededCursorSurvivesAResume() {
+        // The bug this pins cost a real migration its correctness. A lazily chunked source creates
+        // each chunk with no range of its own: its start is a cursor seeded from where the previous
+        // chunk finished, and until it runs it has committed nothing. Judged on progress alone such
+        // a chunk looks empty, so the resume dropped its checkpoint — and the replacement began at
+        // the start of the source. Ten thousand records, stopped and resumed twice, wrote
+        // twenty-six thousand, with every chunk reporting success.
+        List<Split> plan = mixedPlan();
+        Split neverStarted = plan.stream()
+                .filter(split -> split.state() == SplitState.CANCELLED)
+                .findFirst()
+                .orElseThrow();
+
+        JsonNode seed = Json.mapper().createObjectNode().put("after", "oid:6a87dd3f191db9af73c9fa3c");
+        Checkpoint seeded = Checkpoint.initial(neverStarted.id(), original.id(), tenantId, NOW)
+                .startingFrom(seed);
+
+        assertThat(seeded.hasProgress())
+                .as("nothing committed — which is exactly why it used to be discarded")
+                .isFalse();
+
+        when(splits.findByRun(tenantId, original.id())).thenReturn(plan);
+        when(checkpoints.findBySplit(tenantId, neverStarted.id())).thenReturn(Optional.of(seeded));
+
+        orchestrator.retry(original.id(),
+                new RetryOptions(RetryOptions.From.CHECKPOINT, RetryOptions.Scope.FAILED_AND_CANCELLED, false));
+
+        ArgumentCaptor<Checkpoint> copied = ArgumentCaptor.forClass(Checkpoint.class);
+        verify(checkpoints, atLeastOnce()).save(copied.capture());
+
+        assertThat(copied.getAllValues())
+                .as("the seed has to reach the replacement, or it reads the source from the top")
+                .anySatisfy(carried -> assertThat(carried.sourceCursor()).isEqualTo(seed));
     }
 
     @Test

@@ -137,6 +137,22 @@ public record Checkpoint(
     }
 
     /**
+     * Whether this checkpoint says anything about where its chunk should start.
+     *
+     * <p>Wider than {@link #hasProgress()} and the distinction cost a migration its correctness. A
+     * chunk of a lazily chunked source is created with <em>no range of its own</em>: its start is a
+     * cursor seeded here from where the previous chunk finished, and until it runs it has committed
+     * nothing. Judged on progress alone such a chunk looks empty and disposable — and discarding it
+     * does not lose progress, it loses the only record of where the chunk begins. The replacement
+     * then starts from the beginning of the source and reads everything again.
+     *
+     * <p>So: progress, or a position, or both. Either makes this worth carrying to a retry.
+     */
+    public boolean hasResumePosition() {
+        return hasProgress() || (sourceCursor != null && !sourceCursor.isEmpty());
+    }
+
+    /**
      * This position, transplanted onto a chunk of a retrying run.
      *
      * <p>A checkpoint is keyed by chunk, and a retry's chunks are new, so resuming a retry means

@@ -58,7 +58,8 @@ public class ConnectorInstanceController {
 
         var instance = connectors.create(new ConnectorInstanceService.CreateConnectorInstance(
                 request.name(), request.connectorType(), request.direction(),
-                request.config(), request.secretRefs(), request.description()));
+                request.config(), request.secretRefs(), request.description(),
+                ConnectorInstanceDtos.RateLimit.policyOf(request.rateLimit())));
 
         return ResponseEntity
                 .created(UriComponentsBuilder.fromPath("/api/v1/connector-instances/{id}")
@@ -110,7 +111,8 @@ public class ConnectorInstanceController {
         var instance = connectors.update(ConnectorInstanceId.parse(id),
                 new ConnectorInstanceService.UpdateConnectorInstance(
                         request.name(), request.config(), request.secretRefs(), request.description(),
-                        request.direction()));
+                        request.direction(),
+                        ConnectorInstanceDtos.RateLimit.policyOf(request.rateLimit())));
 
         return ConnectorInstanceDtos.Response.from(instance);
     }
