@@ -58,6 +58,9 @@ public class PipelineEntity {
     @Column(name = "latest_version", nullable = false)
     private int latestVersion;
 
+    @Column(name = "monitored", nullable = false)
+    private boolean monitored;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -79,7 +82,9 @@ public class PipelineEntity {
 
     public PipelineEntity(UUID id, UUID tenantId, String name, String description, String folder,
                           JsonNode tags, String status, Integer publishedVersion, int latestVersion,
-                          Instant createdAt, Instant updatedAt, long rowVersion) {
+                          Instant createdAt, Instant updatedAt, long rowVersion,
+                          boolean monitored) {
+        this.monitored = monitored;
         this.id = id;
         this.tenantId = tenantId;
         this.name = name;
@@ -130,6 +135,14 @@ public class PipelineEntity {
         return latestVersion;
     }
 
+    public boolean isMonitored() {
+        return monitored;
+    }
+
+    public void setMonitored(boolean monitored) {
+        this.monitored = monitored;
+    }
+
     public Instant getCreatedAt() {
         return createdAt;
     }
@@ -145,7 +158,8 @@ public class PipelineEntity {
     /** Copies mutable state onto a managed instance, leaving Hibernate to detect the change. */
     public void apply(String newName, String newDescription, String newFolder, JsonNode newTags,
                       String newStatus, Integer newPublishedVersion, int newLatestVersion,
-                      Instant newUpdatedAt) {
+                      Instant newUpdatedAt, boolean newMonitored) {
+        this.monitored = newMonitored;
         this.name = newName;
         this.description = newDescription;
         this.folder = newFolder;

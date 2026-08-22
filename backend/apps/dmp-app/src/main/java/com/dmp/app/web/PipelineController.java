@@ -114,6 +114,17 @@ public class PipelineController {
         return PipelineDtos.Response.from(pipeline);
     }
 
+    @PostMapping("/{id}/monitor")
+    @Operation(summary = "Watch or stop watching this pipeline on the operations dashboard",
+            description = "The dashboard is a watchlist rather than every pipeline, because a "
+                    + "screen that grows with the platform stops being read — the nightly load "
+                    + "that matters ends up among fifty experiments, and the person scanning it "
+                    + "every morning learns to skim.")
+    public PipelineDtos.Response monitor(@PathVariable String id,
+                                         @RequestParam(defaultValue = "true") boolean watched) {
+        return PipelineDtos.Response.from(pipelines.monitor(PipelineId.parse(id), watched));
+    }
+
     @PostMapping("/{id}/archive")
     @Operation(summary = "Archive a pipeline",
             description = "Removes it from active views and prevents new runs. History is retained "

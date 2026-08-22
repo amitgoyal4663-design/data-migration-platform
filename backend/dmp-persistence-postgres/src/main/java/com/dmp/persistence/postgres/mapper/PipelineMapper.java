@@ -34,6 +34,7 @@ public final class PipelineMapper {
                 entity.getFolder(),
                 toTagSet(entity.getTags()),
                 PipelineStatus.valueOf(entity.getStatus()),
+                entity.isMonitored(),
                 entity.getPublishedVersion(),
                 entity.getLatestVersion(),
                 entity.getCreatedAt(),
@@ -54,7 +55,8 @@ public final class PipelineMapper {
                 domain.latestVersion(),
                 domain.createdAt(),
                 domain.updatedAt(),
-                domain.rowVersion());
+                domain.rowVersion(),
+                domain.monitored());
     }
 
     /** Copies mutable state onto a managed entity so Hibernate performs an update, not an insert. */
@@ -67,7 +69,8 @@ public final class PipelineMapper {
                 domain.status().name(),
                 domain.publishedVersion(),
                 domain.latestVersion(),
-                domain.updatedAt());
+                domain.updatedAt(),
+                domain.monitored());
     }
 
     private static Set<String> toTagSet(JsonNode tags) {

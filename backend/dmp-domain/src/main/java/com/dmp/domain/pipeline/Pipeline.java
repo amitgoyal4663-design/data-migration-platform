@@ -32,6 +32,14 @@ public record Pipeline(
         String folder,
         Set<String> tags,
         PipelineStatus status,
+        /**
+         * On the support team's daily screen.
+         *
+         * <p>A watchlist rather than every pipeline, because a screen that grows with the platform
+         * stops being read: the nightly load that matters ends up among fifty experiments and
+         * one-off migrations, and the person scanning it every morning learns to skim.
+         */
+        boolean monitored,
         Integer publishedVersion,
         int latestVersion,
         Instant createdAt,
@@ -69,14 +77,14 @@ public record Pipeline(
     public static Pipeline create(TenantId tenantId, String name, String description,
                                   String folder, Set<String> tags, Instant now) {
         return new Pipeline(PipelineId.newId(), tenantId, name, description, folder, tags,
-                PipelineStatus.DRAFT, null, 0, now, now, 0L);
+                PipelineStatus.DRAFT, false, null, 0, now, now, 0L);
     }
 
     public Pipeline updateMetadata(String newName, String newDescription, String newFolder,
                                    Set<String> newTags, Instant now) {
         requireMutable();
         return new Pipeline(id, tenantId, newName, newDescription, newFolder, newTags,
-                status, publishedVersion, latestVersion, createdAt, now, rowVersion);
+                status, monitored, publishedVersion, latestVersion, createdAt, now, rowVersion);
     }
 
     /** Records that a new draft version was created. Does not change what is published. */
@@ -88,7 +96,7 @@ public record Pipeline(
                     Map.of("expected", latestVersion + 1, "actual", versionNumber));
         }
         return new Pipeline(id, tenantId, name, description, folder, tags,
-                status, publishedVersion, versionNumber, createdAt, now, rowVersion);
+                status, monitored, publishedVersion, versionNumber, createdAt, now, rowVersion);
     }
 
     /**
@@ -107,7 +115,7 @@ public record Pipeline(
         }
         int floor = Math.max(highestRemaining, publishedVersion == null ? 0 : publishedVersion);
         return new Pipeline(id, tenantId, name, description, folder, tags,
-                status, publishedVersion, floor, createdAt, now, rowVersion);
+                status, monitored, publishedVersion, floor, createdAt, now, rowVersion);
     }
 
     /**
@@ -125,13 +133,13 @@ public record Pipeline(
         }
         PipelineStatus next = status == PipelineStatus.DRAFT ? PipelineStatus.ACTIVE : status;
         return new Pipeline(id, tenantId, name, description, folder, tags,
-                next, versionNumber, latestVersion, createdAt, now, rowVersion);
+                next, monitored, versionNumber, latestVersion, createdAt, now, rowVersion);
     }
 
     public Pipeline archive(Instant now) {
         status.requireTransitionTo(PipelineStatus.ARCHIVED);
         return new Pipeline(id, tenantId, name, description, folder, tags,
-                PipelineStatus.ARCHIVED, publishedVersion, latestVersion, createdAt, now, rowVersion);
+                PipelineStatus.ARCHIVED, monitored, publishedVersion, latestVersion, createdAt, now, rowVersion);
     }
 
     public Pipeline restore(Instant now) {
@@ -140,7 +148,19 @@ public record Pipeline(
         // Restoring must not make an unpublished pipeline runnable.
         PipelineStatus next = publishedVersion == null ? PipelineStatus.DRAFT : PipelineStatus.ACTIVE;
         return new Pipeline(id, tenantId, name, description, folder, tags,
-                next, publishedVersion, latestVersion, createdAt, now, rowVersion);
+                next, monitored, publishedVersion, latestVersion, createdAt, now, rowVersion);
+    }
+
+    /**
+     * Puts this pipeline on the support team's daily screen, or takes it off.
+     *
+     * <p>Allowed in any state, including archived. Somebody investigating why an archived
+     * pipeline's last run looked wrong should be able to watch it without reviving it, and
+     * refusing would be the platform overruling its user for no benefit.
+     */
+    public Pipeline monitored(boolean watched, Instant now) {
+        return new Pipeline(id, tenantId, name, description, folder, tags,
+                status, watched, publishedVersion, latestVersion, createdAt, now, rowVersion);
     }
 
     public Optional<Integer> publishedVersionNumber() {

@@ -40,11 +40,14 @@ import {
   usePublishVersion,
   useRunParameterNames,
   useRuns,
+  useMonitorPipeline,
   useStartRun,
   useVersions,
 } from '@/api/hooks'
 import { PageHeader } from '@/components/PageHeader'
 import ScienceIcon from '@mui/icons-material/ScienceOutlined'
+import VisibilityIcon from '@mui/icons-material/VisibilityOutlined'
+import VisibilityOffIcon from '@mui/icons-material/VisibilityOffOutlined'
 import { RunDialog } from '@/components/RunDialog'
 import { ErrorPanel, Loading } from '@/components/Feedback'
 import RestartAltIcon from '@mui/icons-material/RestartAltOutlined'
@@ -94,6 +97,7 @@ export function PipelineDetailPage() {
   const deleteVersion = useDeleteVersion(pipelineId)
   const publish = usePublishVersion(pipelineId)
   const startRun = useStartRun()
+  const monitor = useMonitorPipeline()
   // Which button opened the dialog, so the dialog can say so and the start can honour it.
   const [dryRun, setDryRun] = useState(false)
   const copyVersion = useCopyVersion(pipelineId)
@@ -179,6 +183,18 @@ export function PipelineDetailPage() {
         }
         actions={
           <>
+            {/*
+              * On the support team's screen or not. Here rather than on a settings page, because
+              * the decision is made while looking at the pipeline and wondering whether anybody
+              * would notice if it stopped.
+              */}
+            <Button
+              startIcon={current.monitored ? <VisibilityIcon /> : <VisibilityOffIcon />}
+              disabled={monitor.isPending}
+              onClick={() => monitor.mutate({ id: pipelineId, watched: !current.monitored })}
+            >
+              {current.monitored ? 'Watched' : 'Watch'}
+            </Button>
             <Button startIcon={<AddIcon />} onClick={newVersion} disabled={createVersion.isPending}>
               {latestDraft ? `Edit draft v${latestDraft.versionNumber}` : 'New version'}
             </Button>

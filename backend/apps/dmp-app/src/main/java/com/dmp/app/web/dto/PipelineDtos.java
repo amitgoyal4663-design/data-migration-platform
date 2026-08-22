@@ -29,6 +29,8 @@ public final class PipelineDtos {
             String folder,
             Set<String> tags,
             String status,
+            @Schema(description = "On the support team's daily operations dashboard")
+            boolean monitored,
             @Schema(description = "Version currently published and runnable; null if never published")
             Integer publishedVersion,
             @Schema(description = "Highest version number allocated, published or not")
@@ -46,6 +48,7 @@ public final class PipelineDtos {
                     pipeline.folder(),
                     pipeline.tags(),
                     pipeline.status().name(),
+                    pipeline.monitored(),
                     pipeline.publishedVersion(),
                     pipeline.latestVersion(),
                     pipeline.isRunnable(),

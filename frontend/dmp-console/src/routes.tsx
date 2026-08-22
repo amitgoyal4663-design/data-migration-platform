@@ -5,6 +5,7 @@ import { PipelinesPage } from './pages/PipelinesPage'
 import { PipelineDetailPage } from './pages/PipelineDetailPage'
 import { DesignerPage } from './pages/DesignerPage'
 import { ConnectorsPage } from './pages/ConnectorsPage'
+import { OperationsPage } from './pages/OperationsPage'
 import { RunsPage } from './pages/RunsPage'
 import { RunDetailPage } from './pages/RunDetailPage'
 import { SchedulesPage } from './pages/SchedulesPage'
@@ -24,6 +25,7 @@ export const router = createBrowserRouter([
       { path: 'connectors', element: <ConnectorsPage /> },
       { path: 'schedules', element: <SchedulesPage /> },
       { path: 'notifications', element: <NotifiersPage /> },
+      { path: 'operations', element: <OperationsPage /> },
       { path: 'runs', element: <RunsPage /> },
       { path: 'runs/:runId', element: <RunDetailPage /> },
       { path: 'records', element: <RecordSearchPage /> },

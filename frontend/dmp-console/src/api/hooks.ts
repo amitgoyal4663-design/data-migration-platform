@@ -24,6 +24,7 @@ import type {
   PipelineVersionSummary,
   RateLimit,
   Notifier,
+  OperationsDashboard,
   NotifierEvent,
   RecordError,
   Reconciliation,
@@ -299,6 +300,33 @@ export function useSourceParameters(connectorInstanceId: string | undefined) {
         `/api/v1/connector-instances/${connectorInstanceId}/parameters`,
       ),
     enabled: Boolean(connectorInstanceId),
+  })
+}
+
+/**
+ * The support team's screen.
+ *
+ * Polled slowly and on purpose: nothing here changes second to second, and the query behind it
+ * walks every watched pipeline's recent history.
+ */
+export function useOperationsDashboard(refetchInterval: number) {
+  return useQuery({
+    queryKey: ['operations-dashboard'],
+    queryFn: () => api.get<OperationsDashboard>('/api/v1/operations/dashboard'),
+    refetchInterval,
+  })
+}
+
+export function useMonitorPipeline() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, watched }: { id: string; watched: boolean }) =>
+      api.post<Pipeline>(`/api/v1/pipelines/${id}/monitor?watched=${watched}`),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['pipeline'] })
+      client.invalidateQueries({ queryKey: ['pipelines'] })
+      client.invalidateQueries({ queryKey: ['operations-dashboard'] })
+    },
   })
 }
 

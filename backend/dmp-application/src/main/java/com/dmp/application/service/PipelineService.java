@@ -113,6 +113,26 @@ public class PipelineService {
         return pipelines.search(tenantContext.currentTenant(), criteria, pageQuery);
     }
 
+    /**
+     * Puts a pipeline on the support team's daily screen, or takes it off.
+     *
+     * <p>Audited like every other change to a definition. Quietly removing a pipeline from the one
+     * screen a team trusts to be complete is exactly the kind of change somebody needs to be able
+     * to find afterwards.
+     */
+    @Transactional
+    public Pipeline monitor(PipelineId id, boolean watched) {
+        TenantId tenantId = tenantContext.currentTenant();
+        Instant now = clock.instant();
+        Pipeline existing = require(tenantId, id);
+
+        Pipeline updated = pipelines.save(existing.monitored(watched, now));
+        audit(tenantId, AuditAction.UPDATE, updated, existing, updated,
+                (watched ? "Now watching '" : "Stopped watching '") + updated.name()
+                        + "' on the operations dashboard", now);
+        return updated;
+    }
+
     @Transactional
     public Pipeline archive(PipelineId id) {
         TenantId tenantId = tenantContext.currentTenant();

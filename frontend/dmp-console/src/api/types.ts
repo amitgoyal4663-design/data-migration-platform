@@ -62,6 +62,8 @@ export interface Page<T> {
 
 export interface Pipeline {
   id: string
+  /** On the support team's daily operations dashboard. */
+  monitored: boolean
   name: string
   description: string | null
   folder: string | null
@@ -126,6 +128,40 @@ export interface ChunkSummary {
   unfinished: number
   /** Already written by chunks that did not finish, and so what a retry would deliver twice. */
   recordsAtRisk: number
+}
+
+/** How loudly a dashboard finding should be read. */
+export type FindingSeverity = 'INFO' | 'WARNING' | 'CRITICAL'
+
+export interface OperationsFinding {
+  severity: FindingSeverity
+  code: string
+  message: string
+  /** What the number was judged against, so the screen can show the comparison, not just a verdict. */
+  detail: string | null
+}
+
+export interface PipelineHealth {
+  pipelineId: string
+  name: string
+  /** The most recent real run. Null for a watched pipeline that has never run. */
+  latest: Run | null
+  /** Median records read over recent completed runs. Null until there are enough to say anything. */
+  typicalRows: number | null
+  typicalSeconds: number | null
+  /** How many runs the comparison rests on — three and ten deserve different belief. */
+  baselineRuns: number
+  worst: FindingSeverity
+  healthy: boolean
+  findings: OperationsFinding[]
+}
+
+export interface OperationsDashboard {
+  /** Worst first: a screen read every morning is scanned from the top. */
+  pipelines: PipelineHealth[]
+  watched: number
+  healthy: number
+  generatedAt: string
 }
 
 /** How a reconciliation row should be read. The server decides; the console only styles. */
