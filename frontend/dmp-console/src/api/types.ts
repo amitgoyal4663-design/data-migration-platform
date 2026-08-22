@@ -208,6 +208,15 @@ export interface OperationsSchedule {
   nextDueAt: string | null
 }
 
+/** One line of the summary strip: a whole sentence, already interpreted. */
+export interface OperationsHeadline {
+  severity: FindingSeverity
+  headline: string
+  detail: string
+  pipelineId: string | null
+  runId: string | null
+}
+
 export interface OperationsDashboard {
   /** Worst first: a screen read every morning is scanned from the top. */
   pipelines: PipelineHealth[]
@@ -217,6 +226,8 @@ export interface OperationsDashboard {
   live: OperationsLiveRun[]
   /** Every run in the window, watched or not. */
   totals: OperationsTotals
+  /** Biggest first. Read at a glance and often relayed to somebody else verbatim. */
+  headlines: OperationsHeadline[]
   generatedAt: string
 }
 

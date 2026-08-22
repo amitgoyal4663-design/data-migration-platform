@@ -20,6 +20,7 @@ import { RunStateChip } from '@/components/StateChip'
 import { muted, tabular } from '@/theme'
 import type {
   OperationsAttempt,
+  OperationsHeadline,
   OperationsLiveRun,
   OperationsTotals,
   PipelineHealth,
@@ -44,7 +45,7 @@ export function OperationsPage() {
   if (dashboard.error) return <ErrorPanel error={dashboard.error} />
   if (!dashboard.data) return null
 
-  const { pipelines, watched, healthy, live, totals, generatedAt } = dashboard.data
+  const { pipelines, watched, healthy, live, totals, headlines, generatedAt } = dashboard.data
   const attention = pipelines.filter((pipeline) => !pipeline.healthy)
 
   return (
@@ -55,6 +56,8 @@ export function OperationsPage() {
           generatedAt,
         ).toLocaleTimeString()}`}
       />
+
+      <Headlines headlines={headlines} />
 
       <Highlights totals={totals} />
 
@@ -88,6 +91,100 @@ export function OperationsPage() {
         ))}
       </Stack>
     </>
+  )
+}
+
+/**
+ * The screen in sentences, before any of the figures.
+ *
+ * Everything below this is numbers, and a number has to be interpreted before it means anything —
+ * 60,301 is alarming or routine depending on what it is out of and which job it belongs to. These
+ * have already done that work: three lines and somebody knows whether to sit down or get up.
+ *
+ * The first is given the room, because a strip where everything is the same size is a strip
+ * where nothing is first.
+ */
+function Headlines({ headlines }: { headlines: OperationsHeadline[] }) {
+  if (headlines.length === 0) return null
+
+  const lead = headlines[0]
+  const rest = headlines.slice(1)
+  if (!lead) return null
+
+  return (
+    <Paper sx={{ mb: 2, overflow: 'hidden' }}>
+      <HeadlineRow item={lead} lead />
+      {rest.slice(0, 4).map((item, index) => (
+        <HeadlineRow key={index} item={item} />
+      ))}
+      {rest.length > 4 && (
+        <Typography variant="caption" sx={{ color: muted, display: 'block', px: 2, py: 1 }}>
+          and {rest.length - 4} more below
+        </Typography>
+      )}
+    </Paper>
+  )
+}
+
+function HeadlineRow({ item, lead }: { item: OperationsHeadline; lead?: boolean }) {
+  const tone =
+    item.severity === 'CRITICAL'
+      ? 'error.main'
+      : item.severity === 'WARNING'
+        ? 'warning.main'
+        : 'text.secondary'
+
+  const to = item.runId
+    ? `/runs/${item.runId}`
+    : item.pipelineId
+      ? `/pipelines/${item.pipelineId}`
+      : null
+
+  const line = (
+    <Box
+      sx={{
+        display: 'flex',
+        alignItems: 'baseline',
+        gap: 1.5,
+        px: 2,
+        py: lead ? 1.75 : 1.1,
+        borderTop: lead ? undefined : '1px solid',
+        borderColor: 'divider',
+        borderLeft: 3,
+        borderLeftColor: item.severity === 'INFO' ? 'transparent' : tone,
+        ...(to && { '&:hover': { bgcolor: 'action.hover' } }),
+      }}
+    >
+      {/* The word as well as the colour. One man in twelve cannot separate red from amber. */}
+      {item.severity !== 'INFO' && (
+        <Typography
+          variant="caption"
+          sx={{ color: tone, fontWeight: 700, letterSpacing: '0.08em', minWidth: 64 }}
+        >
+          {item.severity === 'CRITICAL' ? 'FAILED' : 'CHECK'}
+        </Typography>
+      )}
+      <Typography
+        sx={{
+          fontSize: lead ? 18 : 15,
+          fontWeight: lead ? 600 : 500,
+          color: item.severity === 'INFO' ? 'text.primary' : tone,
+        }}
+      >
+        {item.headline}
+      </Typography>
+      <Typography variant="body2" sx={{ color: muted, minWidth: 0, flex: 1 }}>
+        {item.detail}
+      </Typography>
+    </Box>
+  )
+
+  return to ? (
+    <Box component={RouterLink} to={to} sx={{ display: 'block', textDecoration: 'none' }}>
+      {line}
+    </Box>
+  ) : (
+    line
   )
 }
 

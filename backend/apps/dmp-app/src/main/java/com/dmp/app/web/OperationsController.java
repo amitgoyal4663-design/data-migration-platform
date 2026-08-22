@@ -64,6 +64,8 @@ public class OperationsController {
                         l.progress(), l.recordsRead(), l.recordsWritten(), l.seconds())).toList(),
                 new TotalsResponse(t.completed(), t.failed(), t.recordsRead(), t.recordsWritten(),
                         t.recordsFailed(), t.running()),
+                data.headlines().stream().map(h -> new HeadlineResponse(h.severity().name(),
+                        h.headline(), h.detail(), h.pipelineId(), h.runId())).toList(),
                 data.generatedAt());
     }
 
@@ -79,7 +81,15 @@ public class OperationsController {
             @Schema(description = "Every run in the window, watched or not, so the headline "
                     + "figures describe the platform rather than the watchlist")
             TotalsResponse totals,
+            @Schema(description = "The screen in sentences, biggest first. A figure has to be "
+                    + "interpreted before it means anything; a headline has already done that.")
+            List<HeadlineResponse> headlines,
             Instant generatedAt) {
+    }
+
+    @Schema(name = "OperationsHeadline")
+    public record HeadlineResponse(String severity, String headline, String detail,
+                                   String pipelineId, String runId) {
     }
 
     @Schema(name = "OperationsLiveRun")

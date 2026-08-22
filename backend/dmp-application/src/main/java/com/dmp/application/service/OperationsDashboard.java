@@ -167,7 +167,93 @@ public class OperationsDashboard {
                 recent.stream().mapToLong(r -> r.metrics().recordsFailed()).sum(),
                 live.size());
 
-        return new Dashboard(health, live, totals, now);
+        return new Dashboard(health, live, totals, headlines(health, live, totals, window), now);
+    }
+
+    /**
+     * The screen in sentences, biggest first.
+     *
+     * <p>Everything else here is figures, and a figure has to be interpreted before it means
+     * anything: 60,301 is alarming or routine depending on what it is out of and which job it
+     * belongs to. A headline has already done that work — somebody reads three lines and knows
+     * whether to put their coat back on.
+     *
+     * <p>Written as whole sentences naming the job, because these are read at a glance and often
+     * relayed to somebody else verbatim. "VOLUME_LOW 4,900" is a log line; "the nightly policy
+     * transfer moved half its usual volume" is something you can say out loud.
+     *
+     * <p>Good news is included when there is any. A strip that only ever appears in a crisis is a
+     * strip people learn to see as an error box, and then the quiet mornings carry no information
+     * at all.
+     */
+    private List<Headline> headlines(List<PipelineHealth> health, List<Live> live, Totals totals,
+                                     Duration window) {
+        List<Headline> headlines = new ArrayList<>();
+        String period = window.toHours() < 48
+                ? "the last " + window.toHours() + " hours"
+                : "the last " + (window.toHours() / 24) + " days";
+
+        // Worst first, and only from jobs that actually have something wrong: the strip is a
+        // summary, not a second copy of the cards below it.
+        for (PipelineHealth job : health) {
+            for (Finding finding : job.findings()) {
+                if (finding.severity() == Severity.INFO) {
+                    continue;
+                }
+                headlines.add(new Headline(finding.severity(), switch (finding.code()) {
+                    case "FAILED" -> job.name() + " failed";
+                    case "UNACCOUNTED" -> job.name() + " lost records without reporting them";
+                    case "DID_NOT_RUN" -> job.name() + " was due and never started";
+                    case "NO_ROWS" -> job.name() + " ran but moved nothing";
+                    case "VOLUME_LOW" -> job.name() + " moved well below its usual volume";
+                    case "VOLUME_HIGH" -> job.name() + " moved far more than usual";
+                    case "REJECTIONS" -> job.name() + " could not deliver a tenth of its records";
+                    case "SLOW" -> job.name() + " is taking far longer than usual";
+                    default -> job.name() + " needs attention";
+                }, finding.message(), job.pipelineId(),
+                        job.latest() == null ? null : job.latest().id().toString()));
+            }
+        }
+
+        headlines.sort(Comparator.comparingInt((Headline h) -> h.severity().ordinal()).reversed());
+
+        // A run in flight is the one thing on this screen that changes while somebody watches it,
+        // so it earns a line even when nothing is wrong.
+        if (!live.isEmpty()) {
+            headlines.add(new Headline(Severity.INFO,
+                    live.size() == 1
+                            ? live.get(0).pipeline() + " is running now"
+                            : live.size() + " jobs are running now",
+                    live.stream().map(Live::pipeline).distinct().limit(3)
+                            .reduce((a, b) -> a + ", " + b).orElse(""),
+                    null, live.size() == 1 ? live.get(0).runId() : null));
+        }
+
+        // The figure everybody is asked for, said rather than left to be added up.
+        if (totals.recordsWritten() > 0) {
+            headlines.add(new Headline(Severity.INFO,
+                    String.format("%,d records transferred in %s", totals.recordsWritten(), period),
+                    String.format("across %d completed run%s%s", totals.completed(),
+                            totals.completed() == 1 ? "" : "s",
+                            totals.recordsFailed() > 0
+                                    ? String.format(", with %,d not delivered", totals.recordsFailed())
+                                    : " with nothing lost"),
+                    null, null));
+        }
+
+        if (headlines.stream().noneMatch(h -> h.severity() != Severity.INFO)) {
+            headlines.add(0, new Headline(Severity.INFO, "Nothing has failed in " + period,
+                    "Every watched job ran, moved its usual volume, and lost nothing.", null, null));
+        }
+        return List.copyOf(headlines);
+    }
+
+    /**
+     * @param headline a whole sentence, naming the job — read at a glance and often relayed verbatim
+     * @param detail   the figure or reason behind it, for whoever wants the next level down
+     */
+    public record Headline(Severity severity, String headline, String detail, String pipelineId,
+                           String runId) {
     }
 
     /** Every watched pipeline, with its last run judged against its own history. */
@@ -471,7 +557,7 @@ public class OperationsDashboard {
     }
 
     public record Dashboard(List<PipelineHealth> pipelines, List<Live> live, Totals totals,
-                            Instant generatedAt) {
+                            List<Headline> headlines, Instant generatedAt) {
     }
 
     /** How loudly a finding should be read. */
