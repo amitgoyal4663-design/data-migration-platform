@@ -559,6 +559,8 @@ export interface JsonSchema {
   required?: string[]
   enum?: string[]
   default?: unknown
+  /** Marks the one field that decides which records a source reads — what a named query replaces. */
+  'x-dmp-selection'?: boolean
 }
 
 export interface RunMetrics {

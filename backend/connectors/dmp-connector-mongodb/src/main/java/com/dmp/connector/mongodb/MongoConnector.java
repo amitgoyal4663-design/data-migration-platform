@@ -697,12 +697,13 @@ public class MongoConnector implements Source, Sink {
 
         properties.set("database", ConfigFields.advanced(field("string",
                 "Database, when the connection string does not already name one.")));
-        properties.set("filter", ConfigFields.advanced(ConfigFields.sourceField("string",
+        properties.set("filter", ConfigFields.selectionField(
+                ConfigFields.advanced(ConfigFields.sourceField("string",
                 "MongoDB query as JSON, to migrate a subset rather than the whole collection — for "
                         + "example {\"status\": \"active\"}. A value written as \":from\" is "
                         + "supplied per run, so {\"updatedAt\": {\"$gt\": \":from\", "
                         + "\"$lte\": \":to\"}} reads a window a schedule or the Run dialog "
-                        + "decides. Empty reads everything.")));
+                        + "decides. Empty reads everything."))));
         properties.set("authDatabase", ConfigFields.advanced(field("string",
                 "Database the separate username and password authenticate against. Ignored when "
                         + "the connection string carries its own credentials. Defaults to admin.")));

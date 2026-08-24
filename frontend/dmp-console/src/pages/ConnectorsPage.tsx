@@ -38,6 +38,7 @@ import Divider from '@mui/material/Divider'
 import { RateLimitFields } from '@/components/RateLimitFields'
 import type { ConnectorInstance, RateLimit } from '@/api/types'
 import { PageHeader } from '@/components/PageHeader'
+import { QueryVariantsEditor } from '@/components/QueryVariantsEditor'
 import { SchemaForm } from '@/components/SchemaForm'
 import { EmptyState, ErrorPanel, Loading } from '@/components/Feedback'
 import { info, muted, status } from '@/theme'
@@ -419,6 +420,24 @@ function CreateConnectorDialog({
                   errors={create.error instanceof Error ? undefined : undefined}
                 />
               </Box>
+
+              {/*
+                Only for an instance that will read. A sink has no selection to name, and offering
+                to write queries for one would be an invitation to configure something that never
+                runs.
+              */}
+              {direction !== 'SINK' && (
+                <>
+                  <Divider />
+                  <QueryVariantsEditor
+                    schema={spec.configSchema}
+                    config={config}
+                    onChange={(queries) =>
+                      setConfig((current) => ({ ...current, queries }))
+                    }
+                  />
+                </>
+              )}
 
               <Divider />
 

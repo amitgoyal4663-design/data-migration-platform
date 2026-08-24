@@ -224,9 +224,17 @@ public class RunOrchestrator {
                         "Published version " + versionNumber + " not found",
                         Map.of("pipelineId", pipelineId.toString())));
 
+        // A run that named no query gets the source's first declared one, and the name is stored
+        // rather than resolved again later. It matters most for what it prevents: a connection
+        // whose selection has been moved into named queries has no top-level filter left, so a
+        // schedule written before them would otherwise read the entire table and report success.
+        String query = queryName == null || queryName.isBlank()
+                ? planner.queryNames(tenantId, version).stream().findFirst().orElse(null)
+                : queryName;
+
         Run run = runs.create(Run.create(tenantId, pipelineId, version.id(), versionNumber,
                 version.mode(), trigger, idempotencyKey, tenantContext.currentActor(), null,
-                parameters, dryRun, queryName, now));
+                parameters, dryRun, query, now));
 
         auditLog.record(AuditEntry.of(tenantId, tenantContext.currentActor(), AuditAction.RUN_START,
                 "run", run.id().toString(),

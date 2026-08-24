@@ -1109,8 +1109,8 @@ public class DatabricksConnector implements Source {
                 "SQL warehouse the statement runs on — the last path segment of its URL. Each "
                         + "environment has its own, so this is usually supplied alongside the "
                         + "host.")));
-        properties.set("sql", ConfigFields.sourceField("string",
-                "The query whose results are migrated, e.g. SELECT * FROM main.sales.orders."));
+        properties.set("sql", ConfigFields.selectionField(ConfigFields.sourceField("string",
+                "The query whose results are migrated, e.g. SELECT * FROM main.sales.orders.")));
 
         properties.set("catalog", ConfigFields.advanced(ConfigFields.sourceField("string",
                 "Catalog the query resolves unqualified names against. Optional.")));

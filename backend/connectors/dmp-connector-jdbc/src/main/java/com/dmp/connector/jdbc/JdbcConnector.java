@@ -610,9 +610,10 @@ public abstract class JdbcConnector implements Source, Sink {
                                 + "set.")), null));
         properties.set("columns", ConfigFields.advanced(field("array",
                 "Columns to read or write. Defaults to all.")));
-        properties.set("where", ConfigFields.advanced(ConfigFields.sourceField("string",
-                "SQL predicate applied to reads, to migrate a subset rather than the whole "
-                        + "table. Empty reads everything.")));
+        properties.set("where", ConfigFields.selectionField(
+                ConfigFields.advanced(ConfigFields.sourceField("string",
+                        "SQL predicate applied to reads, to migrate a subset rather than the whole "
+                                + "table. Empty reads everything."))));
         properties.set("queryTimeoutSeconds", ConfigFields.advanced(field("integer",
                 "0 means no timeout.")));
 

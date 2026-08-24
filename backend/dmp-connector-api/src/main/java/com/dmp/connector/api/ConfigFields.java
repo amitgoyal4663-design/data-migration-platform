@@ -86,6 +86,26 @@ public final class ConfigFields {
         return field;
     }
 
+    /**
+     * Marks the field that decides <em>which</em> records a source reads.
+     *
+     * <p>A Mongo filter, a SQL predicate, a whole SELECT statement: one field per connector holds
+     * the selection, and every other field — host, collection, credentials, chunk size — describes
+     * the connection rather than the question. Only the connector knows which of its settings is
+     * which, so it says so here rather than the console guessing from a list of likely names.
+     *
+     * <p>Read by the console when editing a connection, to offer named queries against that field
+     * (see {@code QueryVariants}). A connector marking none simply offers no named queries, which
+     * is correct for a source whose selection is not expressible as one setting.
+     */
+    public static final String SELECTION = "x-dmp-selection";
+
+    /** Marks the field a named query overrides. See {@link #SELECTION}. */
+    public static ObjectNode selectionField(ObjectNode field) {
+        field.put(SELECTION, true);
+        return field;
+    }
+
     private ConfigFields() {
     }
 
