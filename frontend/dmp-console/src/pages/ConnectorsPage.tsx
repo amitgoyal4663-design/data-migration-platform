@@ -432,9 +432,7 @@ function CreateConnectorDialog({
                   <QueryVariantsEditor
                     schema={spec.configSchema}
                     config={config}
-                    onChange={(queries) =>
-                      setConfig((current) => ({ ...current, queries }))
-                    }
+                    onChange={(patch) => setConfig((current) => ({ ...current, ...patch }))}
                   />
                 </>
               )}

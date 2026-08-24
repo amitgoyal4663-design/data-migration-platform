@@ -52,7 +52,14 @@ export function SchemaForm({
   // someone to set a value that will be silently ignored, and then to wonder why it had no effect.
   const roleOf = (field: unknown) => (field as { 'x-dmp-role'?: string })['x-dmp-role']
   const isAdvanced = (field: unknown) => Boolean((field as { 'x-dmp-advanced'?: boolean })['x-dmp-advanced'])
-  const allEntries = Object.entries(schema.properties ?? {})
+
+  // The field that decides *which* records are read is not asked for here. It is the one setting a
+  // named query replaces, so it belongs with the named queries — see QueryVariantsEditor. Asked for
+  // in both places it would be two boxes holding the same thing, only one of which a run reads, and
+  // no indication of which one that is.
+  const allEntries = Object.entries(schema.properties ?? {}).filter(
+    ([, field]) => !field['x-dmp-selection'],
+  )
 
   // Split before grouping by role, so an advanced source field lands under Advanced rather than
   // under "When reading". A form asking eight questions to connect to a database buries the two
@@ -479,7 +486,7 @@ function envName(field: string): string {
   return field.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()
 }
 
-function label(name: string): string {
+export function label(name: string): string {
   const spaced = name.replace(/([A-Z])/g, ' $1').toLowerCase()
   return spaced.charAt(0).toUpperCase() + spaced.slice(1)
 }
