@@ -61,11 +61,10 @@ export function QueryVariantsEditor({
   useEffect(() => {
     const patch: Record<string, unknown> = {}
     if (named.length > 0) {
-      const queries: Record<string, Record<string, unknown>> = {}
-      for (const variant of named) {
-        queries[variant.name.trim()] = variant.values
-      }
-      patch.queries = queries
+      // A list, not a map keyed by name. Order is meaning here — the first is what a run that
+      // names none is given — and configuration is stored as jsonb, which keeps an object's keys
+      // in its own order rather than the author's.
+      patch.queries = named.map((variant) => ({ name: variant.name.trim(), ...variant.values }))
       for (const [name] of fields) {
         patch[name] = undefined
       }
@@ -233,14 +232,13 @@ interface Variant {
  */
 function read(config: Record<string, unknown>, fields: string[]): Variant[] {
   const queries = config.queries
-  if (queries && typeof queries === 'object' && !Array.isArray(queries)) {
-    const entries = Object.entries(queries as Record<string, unknown>).map(([name, values]) => ({
-      name,
-      values:
-        values && typeof values === 'object' && !Array.isArray(values)
-          ? (values as Record<string, unknown>)
-          : {},
-    }))
+  if (Array.isArray(queries)) {
+    const entries = queries
+      .filter((query): query is Record<string, unknown> => Boolean(query) && typeof query === 'object')
+      .map((query) => {
+        const { name, ...values } = query as { name?: unknown } & Record<string, unknown>
+        return { name: typeof name === 'string' ? name : '', values }
+      })
     if (entries.length > 0) {
       return entries
     }

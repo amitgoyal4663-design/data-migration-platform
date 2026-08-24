@@ -81,6 +81,76 @@ public final class QueryParameters {
     public record Positional(String sql, List<String> names) {
     }
 
+    /** A list-aware pattern: {@code IN (:name)}, the one place a placeholder stands for many values. */
+    private static final Pattern LIST =
+            Pattern.compile("(?i)\\bIN\\s*\\(\\s*:([A-Za-z_][A-Za-z0-9_]*)\\s*\\)");
+
+    /**
+     * Rewrites each {@code IN (:name)} to one marker per value supplied, and flattens the values
+     * to match.
+     *
+     * <p>SQL has no way to bind a list to a single marker. {@code IN (?)} bound to three policy
+     * numbers is not three policy numbers — it is one value that happens to contain commas, and it
+     * matches nothing. That is the worst shape a failure can take here: the query is valid, the
+     * driver is happy, the run completes, and it reports success having read no rows.
+     *
+     * <p>So {@code action IN (:actions)} with two values becomes {@code action IN (:actions_0,
+     * :actions_1)}, and the returned parameters carry {@code actions_0} and {@code actions_1}
+     * separately. Each is still bound, never pasted in, so a value containing a quote stays a value.
+     *
+     * @param supplied the run's parameters, as an object of name to value
+     * @return the rewritten SQL and the parameters to bind against it
+     */
+    public static Expanded expand(String sql, com.fasterxml.jackson.databind.JsonNode supplied) {
+        com.fasterxml.jackson.databind.node.ObjectNode parameters =
+                com.dmp.common.json.Json.newObject();
+        if (supplied != null && supplied.isObject()) {
+            supplied.fields().forEachRemaining(field -> parameters.set(field.getKey(), field.getValue()));
+        }
+        if (sql == null || sql.isBlank()) {
+            return new Expanded(sql, parameters);
+        }
+
+        Matcher matcher = LIST.matcher(withoutStringLiterals(sql));
+        StringBuilder rewritten = new StringBuilder();
+        int copied = 0;
+
+        while (matcher.find()) {
+            String name = matcher.group(1);
+            com.fasterxml.jackson.databind.JsonNode value = parameters.get(name);
+            if (value == null || !value.isArray()) {
+                continue;
+            }
+            if (value.isEmpty()) {
+                throw new ConnectorException(ConnectorException.Kind.CONFIGURATION,
+                        "This query selects records where ':" + name + "' matches one of a list, "
+                                + "and the run supplied an empty list. That would match nothing and "
+                                + "complete as a run that moved no records, so it is refused here "
+                                + "instead. Supply at least one value.");
+            }
+
+            List<String> markers = new ArrayList<>();
+            for (int element = 0; element < value.size(); element++) {
+                String expandedName = name + "_" + element;
+                markers.add(":" + expandedName);
+                parameters.set(expandedName, value.get(element));
+            }
+            parameters.remove(name);
+
+            rewritten.append(sql, copied, matcher.start())
+                    .append("IN (").append(String.join(", ", markers)).append(')');
+            copied = matcher.end();
+        }
+        rewritten.append(sql, copied, sql.length());
+
+        return new Expanded(rewritten.toString(), parameters);
+    }
+
+    /** SQL with one marker per supplied value, and the parameters that match it. */
+    public record Expanded(String sql, com.fasterxml.jackson.databind.node.ObjectNode parameters) {
+    }
+
+
     /**
      * Blanks out quoted text so a colon inside it is not read as a placeholder.
      *

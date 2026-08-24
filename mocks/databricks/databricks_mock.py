@@ -114,11 +114,29 @@ def seed():
     return count, fresh
 
 
-def run(sql):
+def bindings(parameters):
+    """The statement's parameters, as SQLite wants them.
+
+    The Statement Execution API takes them as a list of {name, value, type} and the statement
+    refers to each as :name — which is exactly SQLite's own named-parameter syntax, so there is
+    nothing to translate beyond the shape. Binding them rather than pasting them in is the whole
+    point: it is what lets a caller send a list of policy numbers without quoting anything, and
+    what makes a value containing a quote a value rather than a syntax error.
+    """
+    bound = {}
+    for parameter in parameters or []:
+        name = parameter.get("name")
+        if name:
+            bound[name] = parameter.get("value")
+    return bound
+
+
+def run(sql, parameters=None):
     """Executes the statement and keeps its whole result. Real warehouses stream; this does not."""
     try:
         db = sqlite3.connect(DB)
-        cursor = db.execute(sql)
+        bound = bindings(parameters)
+        cursor = db.execute(sql, bound) if bound else db.execute(sql)
         columns = [c[0] for c in cursor.description or []]
         # Every value is a string: that is how the Statement Execution API returns a JSON_ARRAY
         # result, whatever the column's declared type.
@@ -229,6 +247,7 @@ class Handler(BaseHTTPRequestHandler):
 
         body = json.loads(raw)
         sql = body.get("statement", "SELECT * FROM orders")
+        parameters = body.get("parameters")
 
         # Refused outright, before the query is even run — a warehouse failing over, or a
         # statement the workspace will not accept right now.
@@ -242,7 +261,7 @@ class Handler(BaseHTTPRequestHandler):
                              f"The warehouse is temporarily unavailable")
 
         sid = str(uuid.uuid4())
-        RESULTS[sid] = run(sql)
+        RESULTS[sid] = run(sql, parameters)
         print(f"  ran: {sql[:80]} -> {len(RESULTS[sid].get('rows', []))} rows"
               f"{' [' + RESULTS[sid]['error'] + ']' if 'error' in RESULTS[sid] else ''}")
 

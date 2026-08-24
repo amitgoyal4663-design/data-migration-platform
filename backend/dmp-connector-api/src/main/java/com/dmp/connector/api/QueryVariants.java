@@ -37,8 +37,11 @@ import java.util.List;
  */
 public final class QueryVariants {
 
-    /** Where the map lives in a connector instance's configuration. */
+    /** Where the list lives in a connector instance's configuration. */
     public static final String FIELD = "queries";
+
+    /** What each entry calls itself. Every other field in an entry is configuration to merge. */
+    public static final String NAME = "name";
 
     private QueryVariants() {
     }
@@ -52,11 +55,16 @@ public final class QueryVariants {
      */
     public static List<String> names(JsonNode config) {
         JsonNode queries = config == null ? null : config.get(FIELD);
-        if (queries == null || !queries.isObject() || queries.isEmpty()) {
+        if (queries == null || !queries.isArray()) {
             return List.of();
         }
         List<String> names = new ArrayList<>();
-        queries.fieldNames().forEachRemaining(names::add);
+        for (JsonNode query : queries) {
+            String name = query.path(NAME).asText(null);
+            if (name != null && !name.isBlank()) {
+                names.add(name);
+            }
+        }
         return List.copyOf(names);
     }
 
@@ -76,19 +84,30 @@ public final class QueryVariants {
         if (config == null || name == null || name.isBlank()) {
             return config;
         }
-        JsonNode variant = config.path(FIELD).path(name);
-        if (!variant.isObject()) {
+        JsonNode queries = config.get(FIELD);
+        if (queries == null || !queries.isArray()) {
             return config;
         }
 
-        ObjectNode merged = config.deepCopy();
-        variant.fields().forEachRemaining(field -> merged.set(field.getKey(), field.getValue()));
+        for (JsonNode variant : queries) {
+            if (!variant.isObject() || !name.equals(variant.path(NAME).asText(null))) {
+                continue;
+            }
 
-        // Removed after merging, so a connector never sees the other variants. It has no use for
-        // them, and a connector that started reading them would make this a feature it depends on
-        // rather than one applied to it.
-        merged.remove(FIELD);
-        return merged;
+            ObjectNode merged = config.deepCopy();
+            variant.fields().forEachRemaining(field -> {
+                if (!NAME.equals(field.getKey())) {
+                    merged.set(field.getKey(), field.getValue());
+                }
+            });
+
+            // Removed after merging, so a connector never sees the other variants. It has no use
+            // for them, and a connector that started reading them would make this a feature it
+            // depends on rather than one applied to it.
+            merged.remove(FIELD);
+            return merged;
+        }
+        return config;
     }
 
     /** Whether this instance offers a choice at all. */
@@ -99,10 +118,10 @@ public final class QueryVariants {
     /**
      * The name a run should use when none was chosen.
      *
-     * <p>The first declared, so an instance that offers variants always has a working default and
-     * a schedule written before they existed keeps doing what it did. Declaration order is the
-     * author's own ordering, which makes "the first one" a decision somebody made rather than
-     * whichever name sorts earliest.
+     * <p>The first in the list, so an instance that offers variants always has a working default
+     * and a schedule written before they existed keeps doing what it did. The list is the author's
+     * own ordering, which makes "the first one" a decision somebody made rather than whichever
+     * name happened to sort earliest.
      */
     public static String defaultName(JsonNode config) {
         List<String> names = names(config);

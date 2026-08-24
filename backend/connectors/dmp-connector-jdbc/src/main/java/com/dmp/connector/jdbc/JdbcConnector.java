@@ -134,15 +134,17 @@ public abstract class JdbcConnector implements Source, Sink {
             }
 
             try (Connection connection = connect(config, context)) {
+                QueryParameters.Expanded expanded =
+                        QueryParameters.expand(config.whereClause(), context.parameters());
                 QueryParameters.Positional filter =
-                        QueryParameters.toPositional(config.whereClause());
+                        QueryParameters.toPositional(expanded.sql());
                 String sql = "SELECT MIN(" + dialect.quote(config.splitColumn()) + "), MAX("
                         + dialect.quote(config.splitColumn()) + ")"
                         + " FROM " + config.qualifiedTable(dialect)
                         + (filter.sql() == null ? "" : " WHERE " + filter.sql());
 
                 try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                    bindFilter(statement, filter, context, 1);
+                    bindFilter(statement, filter, expanded.parameters(), 1);
                     ResultSet rs = statement.executeQuery();
 
                     if (!rs.next() || rs.getObject(1) == null) {
@@ -262,13 +264,15 @@ public abstract class JdbcConnector implements Source, Sink {
                 this.connection.setAutoCommit(!dialect.requiresTransactionForStreaming());
                 this.connection.setReadOnly(true);
 
-                String sql = buildQuery(config, dialect, split, fromCursor);
+                QueryParameters.Expanded expanded =
+                        QueryParameters.expand(config.whereClause(), context.parameters());
+                String sql = buildQuery(config, dialect, split, fromCursor, expanded);
                 this.statement = connection.prepareStatement(sql);
                 this.statement.setFetchSize(fetchSize);
                 if (config.queryTimeoutSeconds() > 0) {
                     this.statement.setQueryTimeout(config.queryTimeoutSeconds());
                 }
-                bindQuery(statement, config, context, split, fromCursor);
+                bindQuery(statement, config, expanded, split, fromCursor);
 
                 this.resultSet = statement.executeQuery();
                 this.metaData = resultSet.getMetaData();
@@ -340,7 +344,8 @@ public abstract class JdbcConnector implements Source, Sink {
         }
 
         private static String buildQuery(JdbcConfig config, JdbcDialect dialect,
-                                         SplitSpec split, JsonNode fromCursor) {
+                                         SplitSpec split, JsonNode fromCursor,
+                                         QueryParameters.Expanded expanded) {
             StringBuilder sql = new StringBuilder("SELECT ")
                     .append(config.selectList(dialect))
                     .append(" FROM ").append(config.qualifiedTable(dialect))
@@ -351,7 +356,7 @@ public abstract class JdbcConnector implements Source, Sink {
             // PreparedStatement is bound by position.
             if (config.whereClause() != null) {
                 sql.append(" AND (")
-                        .append(QueryParameters.toPositional(config.whereClause()).sql())
+                        .append(QueryParameters.toPositional(expanded.sql()).sql())
                         .append(')');
             }
             if (config.isSplittable() && split.spec().hasNonNull("from")) {
@@ -370,12 +375,15 @@ public abstract class JdbcConnector implements Source, Sink {
         }
 
         private static void bindQuery(PreparedStatement statement, JdbcConfig config,
-                                      ConnectorContext context, SplitSpec split, JsonNode fromCursor)
+                                      QueryParameters.Expanded expanded, SplitSpec split,
+                                      JsonNode fromCursor)
                 throws SQLException {
             int index = 1;
 
-            index = bindFilter(statement, QueryParameters.toPositional(config.whereClause()),
-                    context, index);
+            // The same expansion the query text was built from, not a second one computed here.
+            // Two computations that have to agree on how many markers there are eventually do not.
+            index = bindFilter(statement, QueryParameters.toPositional(expanded.sql()),
+                    expanded.parameters(), index);
 
             if (config.isSplittable() && split.spec().hasNonNull("from")) {
                 statement.setObject(index++, JdbcValues.boundaryValue(split.spec().get("from")));
@@ -534,16 +542,17 @@ public abstract class JdbcConnector implements Source, Sink {
      * @return the next free position
      */
     private static int bindFilter(PreparedStatement statement, QueryParameters.Positional filter,
-                                  ConnectorContext context, int index) throws SQLException {
+                                  JsonNode parameters, int index) throws SQLException {
         for (String name : filter.names()) {
-            JsonNode value = context.parameters().get(name);
+            JsonNode value = parameters == null ? null : parameters.get(name);
 
             if (value == null || value.isNull()
                     || (value.isTextual() && value.asText().isBlank())) {
                 throw new ConnectorException(ConnectorException.Kind.CONFIGURATION,
-                        "This pipeline's read filter expects a value for ':" + name + "', but the "
-                                + "run was started without one. Supply it when starting the run, "
-                                + "or remove the placeholder from 'where'.");
+                        "This pipeline's read filter expects a value for ':"
+                                + name.replaceAll("_\\d+$", "") + "', but the run was started "
+                                + "without one. Supply it when starting the run, or remove the "
+                                + "placeholder from 'where'.");
             }
             statement.setObject(index++, JdbcValues.boundaryValue(value));
         }
