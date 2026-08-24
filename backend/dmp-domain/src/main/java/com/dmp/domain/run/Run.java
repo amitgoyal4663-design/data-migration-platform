@@ -91,6 +91,16 @@ public record Run(
          * otherwise be discovered afterwards.
          */
         boolean dryRun,
+        /**
+         * Which named query this run selected records with, or null for the instance's own.
+         *
+         * <p>Stored for the same reason the parameters are: decided once, at the moment the run is
+         * created, so a retry three hours later repeats the same selection rather than whatever
+         * the default has become since. A run is also an account of what happened, and "which
+         * records did this one even look at" is the first thing anybody asks of a run that moved
+         * an unexpected number.
+         */
+        String queryName,
         String errorCode,
         String errorMessage,
         String triggeredBy,
@@ -159,9 +169,18 @@ public record Run(
                              int versionNumber, PipelineMode mode, RunTrigger trigger,
                              String idempotencyKey, String triggeredBy, RunId retryOf,
                              JsonNode parameters, boolean dryRun, Instant now) {
+        return create(tenantId, pipelineId, versionId, versionNumber, mode, trigger, idempotencyKey,
+                triggeredBy, retryOf, parameters, dryRun, null, now);
+    }
+
+    /** Creates a run that selects records with a named query. See {@link #queryName()}. */
+    public static Run create(TenantId tenantId, PipelineId pipelineId, PipelineVersionId versionId,
+                             int versionNumber, PipelineMode mode, RunTrigger trigger,
+                             String idempotencyKey, String triggeredBy, RunId retryOf,
+                             JsonNode parameters, boolean dryRun, String queryName, Instant now) {
         return new Run(RunId.newId(), tenantId, pipelineId, versionId, versionNumber, mode, trigger, retryOf,
                 RunState.CREATED, idempotencyKey, RunMetrics.ZERO, 0, Json.emptyObject(), parameters,
-                dryRun, null, null, triggeredBy, now, null, null, now, 0L);
+                dryRun, queryName, null, null, triggeredBy, now, null, null, now, 0L);
     }
 
     public Run markValidated(Instant now) {
@@ -184,7 +203,7 @@ public record Run(
         ObjectNode merged = preparationState.deepCopy();
         merged.set(nodeId, handle == null ? Json.emptyObject() : handle);
         return new Run(id, tenantId, pipelineId, pipelineVersionId, versionNumber, mode, trigger, retryOf,
-                RunState.PREPARING, idempotencyKey, metrics, activeSlots, merged, parameters, dryRun, errorCode, errorMessage,
+                RunState.PREPARING, idempotencyKey, metrics, activeSlots, merged, parameters, dryRun, queryName, errorCode, errorMessage,
                 triggeredBy, createdAt, startedAt, endedAt, now, rowVersion);
     }
 
@@ -193,7 +212,7 @@ public record Run(
         ObjectNode remaining = preparationState.deepCopy();
         remaining.remove(nodeId);
         return new Run(id, tenantId, pipelineId, pipelineVersionId, versionNumber, mode, trigger, retryOf,
-                state, idempotencyKey, metrics, activeSlots, remaining, parameters, dryRun, errorCode, errorMessage,
+                state, idempotencyKey, metrics, activeSlots, remaining, parameters, dryRun, queryName, errorCode, errorMessage,
                 triggeredBy, createdAt, startedAt, endedAt, now, rowVersion);
     }
 
@@ -205,7 +224,7 @@ public record Run(
     public Run start(Instant now) {
         state.requireTransitionTo(RunState.RUNNING);
         return new Run(id, tenantId, pipelineId, pipelineVersionId, versionNumber, mode, trigger, retryOf,
-                RunState.RUNNING, idempotencyKey, metrics, activeSlots, preparationState, parameters, dryRun, null, null, triggeredBy,
+                RunState.RUNNING, idempotencyKey, metrics, activeSlots, preparationState, parameters, dryRun, queryName, null, null, triggeredBy,
                 createdAt, startedAt == null ? now : startedAt, null, now, rowVersion);
     }
 
@@ -256,21 +275,21 @@ public record Run(
 
     public Run withMetrics(RunMetrics newMetrics) {
         return new Run(id, tenantId, pipelineId, pipelineVersionId, versionNumber, mode, trigger, retryOf,
-                state, idempotencyKey, newMetrics, activeSlots, preparationState, parameters, dryRun, errorCode, errorMessage,
+                state, idempotencyKey, newMetrics, activeSlots, preparationState, parameters, dryRun, queryName, errorCode, errorMessage,
                 triggeredBy, createdAt, startedAt, endedAt, updatedAt, rowVersion);
     }
 
     private Run transition(RunState target, Instant now) {
         state.requireTransitionTo(target);
         return new Run(id, tenantId, pipelineId, pipelineVersionId, versionNumber, mode, trigger, retryOf,
-                target, idempotencyKey, metrics, activeSlots, preparationState, parameters, dryRun, errorCode, errorMessage,
+                target, idempotencyKey, metrics, activeSlots, preparationState, parameters, dryRun, queryName, errorCode, errorMessage,
                 triggeredBy, createdAt, startedAt, endedAt, now, rowVersion);
     }
 
     private Run terminate(RunState target, String code, String message, Instant now) {
         state.requireTransitionTo(target);
         return new Run(id, tenantId, pipelineId, pipelineVersionId, versionNumber, mode, trigger, retryOf,
-                target, idempotencyKey, metrics, activeSlots, preparationState, parameters, dryRun, code, message, triggeredBy,
+                target, idempotencyKey, metrics, activeSlots, preparationState, parameters, dryRun, queryName, code, message, triggeredBy,
                 createdAt, startedAt, now, now, rowVersion);
     }
 

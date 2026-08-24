@@ -627,10 +627,32 @@ export function useReplayRun(runId: string) {
  * the one that actually binds them.
  */
 export function useRunParameterNames(pipelineId: string | undefined) {
+  return useRunParameters(pipelineId)
+}
+
+/**
+ * The placeholders one named query expects, and which of them take a list.
+ *
+ * Per query, because that is the point of naming them: "by date range" wants a from and a to, "by
+ * policy number" wants policy numbers, and a dialog asking for all three would be asking for values
+ * two of which cannot be used.
+ */
+export function useRunParameters(pipelineId: string | undefined, query?: string) {
   return useQuery({
-    queryKey: ['run-parameters', pipelineId],
+    queryKey: ['run-parameters', pipelineId, query ?? ''],
     queryFn: () =>
-      api.get<{ names: string[] }>(`/api/v1/pipelines/${pipelineId}/run-parameters`),
+      api.get<{ names: string[]; lists: string[] }>(
+        `/api/v1/pipelines/${pipelineId}/run-parameters${query ? `?query=${encodeURIComponent(query)}` : ''}`,
+      ),
+    enabled: Boolean(pipelineId),
+  })
+}
+
+/** The named ways this pipeline's source can find records. Empty when it offers no choice. */
+export function useRunQueries(pipelineId: string | undefined) {
+  return useQuery({
+    queryKey: ['run-queries', pipelineId],
+    queryFn: () => api.get<{ names: string[] }>(`/api/v1/pipelines/${pipelineId}/queries`),
     enabled: Boolean(pipelineId),
   })
 }
@@ -642,18 +664,25 @@ export function useStartRun() {
       pipelineId,
       parameters,
       dryRun,
+      query,
     }: {
       pipelineId: string
-      parameters?: Record<string, string>
+      parameters?: Record<string, unknown>
       /** Read and transform everything, write nothing. The destination is never opened. */
       dryRun?: boolean
+      /** Which of the source's named queries selects the records. Null for the connector's own. */
+      query?: string | null
     }) =>
       api.post<Run>(
         `/api/v1/pipelines/${pipelineId}/runs`,
         // Sent only when there is something to say, so an ordinary run posts exactly the body it
         // always did and a deployment running an older server is unaffected by this field.
-        (parameters && Object.keys(parameters).length > 0) || dryRun
-          ? { ...(parameters ? { parameters } : {}), ...(dryRun ? { dryRun: true } : {}) }
+        (parameters && Object.keys(parameters).length > 0) || dryRun || query
+          ? {
+              ...(parameters ? { parameters } : {}),
+              ...(dryRun ? { dryRun: true } : {}),
+              ...(query ? { query } : {}),
+            }
           : undefined,
         {
           // Makes a double-click harmless: the second request returns the run the first created

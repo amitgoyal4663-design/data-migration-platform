@@ -220,9 +220,12 @@ public class ChunkExecutor {
 
         // The chunk index reaches the connectors: a sink that names its own target must scope that
         // name per chunk, or all of a run's chunks write over one another.
+        // Only the source takes a query variant. A sink has no selection to vary — it is told
+        // what to write — and letting one apply there would be a way to repoint a destination.
         ConnectorContext sourceContext = contexts.forChunk(
                 pipeline.sourceInstance(), split.runId().toString(), workerId,
-                split.index(), checkpoint.hasProgress(), pipeline.runParameters());
+                split.index(), checkpoint.hasProgress(), pipeline.runParameters(),
+                pipeline.queryName());
         ConnectorContext sinkContext = contexts.forChunk(
                 pipeline.sinkInstance(), split.runId().toString(), workerId,
                 split.index(), checkpoint.hasProgress());

@@ -25,6 +25,21 @@ public interface Source extends Connector {
     }
 
     /**
+     * Which of those placeholders take a list rather than one value.
+     *
+     * <p>The query already says so, and only the connector can read it: a placeholder sitting
+     * inside {@code $in} or {@code IN (…)} is plural, and anywhere else it is not. Inferring it in
+     * the console would mean the console parsing SQL and Mongo filters, and guessing from the name
+     * — "policyNos looks plural" — works until somebody writes "address".
+     *
+     * <p>Decides whether a run dialog offers one box or a list, and whether the value is sent as a
+     * string or an array. Empty for a query with no list placeholders, which is most of them.
+     */
+    default java.util.Set<String> listParameterNames(JsonNode config) {
+        return java.util.Set.of();
+    }
+
+    /**
      * Opens a read session.
      *
      * <p>Named distinctly from {@link Sink#openSink} because Java erases the parameter types and a

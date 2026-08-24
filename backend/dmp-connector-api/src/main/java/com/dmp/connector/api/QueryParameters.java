@@ -106,4 +106,25 @@ public final class QueryParameters {
         }
         return out.toString();
     }
+
+    /**
+     * Placeholders that sit inside an {@code IN (…)} list, and therefore take several values.
+     *
+     * <p>SQL cannot bind a list, so one of these is expanded into a marker per value before the
+     * statement is submitted. Knowing which they are is also what lets a run dialog offer a list
+     * rather than a single box.
+     */
+    public static java.util.LinkedHashSet<String> listsIn(String sql) {
+        java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+        if (sql == null || sql.isBlank()) {
+            return names;
+        }
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("(?i)\\bIN\\s*\\(\\s*:([A-Za-z_][A-Za-z0-9_]*)\\s*\\)")
+                .matcher(sql);
+        while (matcher.find()) {
+            names.add(matcher.group(1));
+        }
+        return names;
+    }
 }

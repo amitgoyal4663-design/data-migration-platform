@@ -90,6 +90,13 @@ public class DatabricksConnector implements Source {
 
     /** The {@code :placeholders} in the configured query, so the console can ask for them. */
     @Override
+    public java.util.Set<String> listParameterNames(JsonNode config) {
+        // A placeholder inside IN (...) takes a list; anywhere else it takes one value. The query
+        // is the only thing that knows, and it says so plainly.
+        return com.dmp.connector.api.QueryParameters.listsIn(config.path("sql").asText(null));
+    }
+
+    @Override
     public Set<String> parameterNames(JsonNode config) {
         JsonNode sql = config == null ? null : config.get("sql");
         return sql == null || sql.isNull()
@@ -123,7 +130,11 @@ public class DatabricksConnector implements Source {
                 }
 
                 ObjectNode request = Json.newObject();
-                request.put("statement", config.sql());
+                // Expanded first: a list parameter becomes one marker per value, so the
+                // statement submitted is not quite the statement configured.
+                StatementParameters.Bound bound =
+                        StatementParameters.expand(config.sql(), context.parameters());
+                request.put("statement", bound.sql());
                 request.put("warehouse_id", config.warehouseId());
                 request.put("wait_timeout", "0s");
                 request.put("disposition", config.disposition().name());
@@ -140,11 +151,11 @@ public class DatabricksConnector implements Source {
 
                 // Values this run was started with, bound rather than pasted into the SQL. A query
                 // with no :placeholders gets no parameters list and behaves exactly as before.
-                ArrayNode parameters = StatementParameters.bind(config.sql(), context.parameters());
+                ArrayNode parameters = bound.parameters();
                 if (parameters != null) {
                     request.set("parameters", parameters);
                     context.log().info("Databricks statement bound {} parameter(s): {}",
-                            parameters.size(), StatementParameters.referencedBy(config.sql()));
+                            parameters.size(), StatementParameters.referencedBy(bound.sql()));
                 }
 
                 JsonNode statement = session.postJson(config.statementsUrl(),
@@ -663,7 +674,9 @@ public class DatabricksConnector implements Source {
         private void fetch() {
             // ORDER BY inside the subquery would be discarded by most engines; it belongs on the
             // outer statement, where it decides what OFFSET actually means.
-            sql = "SELECT * FROM (" + config.sql() + ") ORDER BY " + config.orderBy()
+            StatementParameters.Bound bound =
+                    StatementParameters.expand(config.sql(), context.parameters());
+            sql = "SELECT * FROM (" + bound.sql() + ") ORDER BY " + config.orderBy()
                     + " LIMIT " + limit + " OFFSET " + offset;
 
             Instant submitted = Instant.now();
@@ -690,7 +703,7 @@ public class DatabricksConnector implements Source {
                 if (config.schema() != null) {
                     request.put("schema", config.schema());
                 }
-                ArrayNode parameters = StatementParameters.bind(config.sql(), context.parameters());
+                ArrayNode parameters = bound.parameters();
                 if (parameters != null) {
                     request.set("parameters", parameters);
                 }
@@ -971,7 +984,6 @@ public class DatabricksConnector implements Source {
     private static long runScalar(DatabricksSession session, DatabricksConfig config,
                                   ConnectorContext context, String sql, String purpose) {
         ObjectNode request = Json.newObject();
-        request.put("statement", sql);
         request.put("warehouse_id", config.warehouseId());
         request.put("wait_timeout", "0s");
         request.put("disposition", "INLINE");
@@ -982,7 +994,11 @@ public class DatabricksConnector implements Source {
         if (config.schema() != null) {
             request.put("schema", config.schema());
         }
-        ArrayNode parameters = StatementParameters.bind(sql, context.parameters());
+        // The caller has already wrapped config.sql(), so expansion happens on the whole
+        // statement — the placeholders are inside the subquery either way.
+        StatementParameters.Bound bound = StatementParameters.expand(sql, context.parameters());
+        request.put("statement", bound.sql());
+        ArrayNode parameters = bound.parameters();
         if (parameters != null) {
             request.set("parameters", parameters);
         }

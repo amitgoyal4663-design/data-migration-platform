@@ -81,6 +81,14 @@ public abstract class JdbcConnector implements Source, Sink {
      * the table and the columns do not.
      */
     @Override
+    public java.util.Set<String> listParameterNames(JsonNode config) {
+        // A placeholder inside IN (...) takes a list; anywhere else it takes one value. The query
+        // is the only thing that knows, and it says so plainly.
+        return com.dmp.connector.api.QueryParameters.listsIn(
+                config == null ? null : config.path("where").asText(null));
+    }
+
+    @Override
     public java.util.Set<String> parameterNames(JsonNode config) {
         JsonNode where = config == null ? null : config.get("where");
         return where == null || where.isNull()

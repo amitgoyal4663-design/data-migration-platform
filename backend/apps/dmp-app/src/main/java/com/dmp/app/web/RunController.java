@@ -91,9 +91,30 @@ public class RunController {
                     dialog can ask for exactly those and nothing else. Empty for a pipeline whose
                     query takes no parameters, which is most of them.
                     """)
-    public RunDtos.ParameterNames runParameters(@PathVariable String pipelineId) {
+    public RunDtos.ParameterNames runParameters(
+            @PathVariable String pipelineId,
+            @Parameter(description = "Which of the source's named queries. Omitted for its own.")
+            @RequestParam(required = false) String query) {
+
+        PipelineId id = PipelineId.parse(pipelineId);
         return new RunDtos.ParameterNames(
-                java.util.List.copyOf(orchestrator.runParameterNames(PipelineId.parse(pipelineId))));
+                java.util.List.copyOf(orchestrator.runParameterNames(id, query)),
+                java.util.List.copyOf(orchestrator.runListParameterNames(id, query)));
+    }
+
+    @GetMapping("/pipelines/{pipelineId}/queries")
+    @Operation(summary = "The named ways this pipeline's source can find records",
+            description = """
+                    A connector may declare several — "By date range" for the nightly load, "By
+                    policy number" for a support desk holding one policy and no idea when it was
+                    last touched. Each declares its own placeholders, so choosing one changes which
+                    boxes the run dialog asks for.
+
+                    Empty for a source that declares none, which is every one written before this
+                    existed: no variants means the configuration is already the query.
+                    """)
+    public RunDtos.ParameterNames runQueries(@PathVariable String pipelineId) {
+        return new RunDtos.ParameterNames(orchestrator.runQueryNames(PipelineId.parse(pipelineId)));
     }
 
     @PostMapping("/pipelines/{pipelineId}/runs")
@@ -123,7 +144,8 @@ public class RunController {
 
         Run run = orchestrator.start(PipelineId.parse(pipelineId), RunTrigger.API, idempotencyKey,
                 request == null ? com.dmp.common.json.Json.emptyObject() : request.parameters(),
-                request != null && request.dryRun());
+                request != null && request.dryRun(),
+                request == null ? null : request.query());
         return RunDtos.Response.from(run, clock.instant());
     }
 

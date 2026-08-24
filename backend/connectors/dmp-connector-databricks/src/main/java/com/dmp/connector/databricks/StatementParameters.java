@@ -49,6 +49,59 @@ final class StatementParameters {
      * @param supplied the values the run was started with
      * @throws ConnectorException naming any placeholder nothing supplied a value for
      */
+    /**
+     * A statement with every list placeholder expanded, and the values to bind to it.
+     *
+     * <p>SQL has no way to bind a list. {@code IN (:policyNos)} with ten values must become
+     * {@code IN (:policyNos_0, …, :policyNos_9)} with ten bindings — expanded into markers, never
+     * concatenated into the statement. A policy number carrying a quote has to stay data; building
+     * the SQL from it would make it code.
+     *
+     * @param sql the statement as written, with {@code :name} placeholders
+     */
+    record Bound(String sql, ArrayNode parameters) {
+    }
+
+    static Bound expand(String sql, JsonNode supplied) {
+        JsonNode values = Json.orEmpty(supplied);
+        String expanded = sql;
+
+        for (String name : referencedBy(sql)) {
+            JsonNode value = values.get(name);
+            if (value == null || !value.isArray() || value.isEmpty()) {
+                continue;
+            }
+            List<String> markers = new ArrayList<>(value.size());
+            for (int i = 0; i < value.size(); i++) {
+                markers.add(":" + name + "_" + i);
+            }
+            // Word-bounded, so :policy and :policyNos are not confused for one another.
+            expanded = expanded.replaceAll(":" + Pattern.quote(name) + "\\b",
+                    String.join(", ", markers));
+        }
+        return new Bound(expanded, bind(expanded, flatten(sql, values)));
+    }
+
+    /**
+     * The supplied values with every list flattened into the markers {@link #expand} created.
+     *
+     * <p>Element by element, so each is typed on its own — a list of numeric ids bound as text
+     * matches nothing against a numeric column, and says nothing about why.
+     */
+    private static JsonNode flatten(String originalSql, JsonNode values) {
+        ObjectNode flat = Json.newObject();
+        values.fields().forEachRemaining(field -> {
+            if (field.getValue().isArray()) {
+                for (int i = 0; i < field.getValue().size(); i++) {
+                    flat.set(field.getKey() + "_" + i, field.getValue().get(i));
+                }
+            } else {
+                flat.set(field.getKey(), field.getValue());
+            }
+        });
+        return flat;
+    }
+
     static ArrayNode bind(String sql, JsonNode supplied) {
         Set<String> referenced = referencedBy(sql);
         if (referenced.isEmpty()) {

@@ -97,6 +97,10 @@ public class RunDocument {
     @Field("dryRun")
     private Boolean dryRun;
 
+    /** Which named query this run selected records with. Null for the connector's own. */
+    @Field("queryName")
+    private String queryName;
+
     @Field("errorCode")
     private String errorCode;
 
@@ -235,6 +239,14 @@ public class RunDocument {
 
     public void setDryRun(Boolean dryRun) {
         this.dryRun = dryRun;
+    }
+
+    public String getQueryName() {
+        return queryName;
+    }
+
+    public void setQueryName(String queryName) {
+        this.queryName = queryName;
     }
 
     public void setParameters(Map<String, Object> parameters) {

@@ -58,7 +58,15 @@ public record ResolvedPipeline(
          * <p>Carried here for the same reason everything else is: fixed for the run's whole life,
          * identical for every chunk, resolved once.
          */
-        boolean dryRun) {
+        boolean dryRun,
+        /**
+         * The named query this run selects records with, or null for the instance's own.
+         *
+         * <p>Here for the same reason the parameters are: fixed for the run's whole life, identical
+         * for every chunk, resolved once. It reaches the connector as a merged configuration and
+         * never as a flag, so nothing downstream needs to know the feature exists.
+         */
+        String queryName) {
 
     /**
      * Ceiling on how long one invocation of a user's script may run.
@@ -86,7 +94,7 @@ public record ResolvedPipeline(
                             ChunkingPolicy chunking, ExecutionPolicy execution, AuditPolicy audit,
                             JsonNode runParameters) {
         this(version, sourceNode, sourceInstance, sinkNode, sinkInstance, transforms, chunking,
-                execution, audit, runParameters, false);
+                execution, audit, runParameters, false, null);
     }
 
     public static ResolvedPipeline resolve(PipelineVersion version,
@@ -104,6 +112,14 @@ public record ResolvedPipeline(
                                            Map<String, ConnectorInstance> instancesById,
                                            JsonNode runParameters,
                                            boolean dryRun) {
+        return resolve(version, instancesById, runParameters, dryRun, null);
+    }
+
+    public static ResolvedPipeline resolve(PipelineVersion version,
+                                           Map<String, ConnectorInstance> instancesById,
+                                           JsonNode runParameters,
+                                           boolean dryRun,
+                                           String queryName) {
 
         List<NodeDefinition> sources = version.definition().nodesOfType(NodeType.SOURCE);
         List<NodeDefinition> sinks = version.definition().nodesOfType(NodeType.SINK);
@@ -129,7 +145,8 @@ public record ResolvedPipeline(
                 version.executionPolicy(),
                 auditPolicyFor(version.auditPolicy(), sinkInstance, dryRun),
                 com.dmp.common.json.Json.orEmpty(runParameters),
-                dryRun);
+                dryRun,
+                queryName);
     }
 
     /**

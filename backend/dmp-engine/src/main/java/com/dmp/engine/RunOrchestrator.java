@@ -125,13 +125,40 @@ public class RunOrchestrator {
      * empty — which is every pipeline that existed before this feature.
      */
     public java.util.Set<String> runParameterNames(PipelineId pipelineId) {
+        return runParameterNames(pipelineId, null);
+    }
+
+    /** The placeholders one of the source's named queries expects. */
+    public java.util.Set<String> runParameterNames(PipelineId pipelineId, String query) {
         TenantId tenantId = tenantContext.currentTenant();
 
         return pipelines.findById(tenantId, pipelineId)
                 .flatMap(Pipeline::publishedVersionNumber)
                 .flatMap(number -> versions.findByNumber(tenantId, pipelineId, number))
-                .map(version -> planner.parameterNames(tenantId, version))
+                .map(version -> planner.parameterNames(tenantId, version, query))
                 .orElseGet(java.util.Set::of);
+    }
+
+    /** Which placeholders take a list, so the dialog offers a list rather than a single box. */
+    public java.util.Set<String> runListParameterNames(PipelineId pipelineId, String query) {
+        TenantId tenantId = tenantContext.currentTenant();
+
+        return pipelines.findById(tenantId, pipelineId)
+                .flatMap(Pipeline::publishedVersionNumber)
+                .flatMap(number -> versions.findByNumber(tenantId, pipelineId, number))
+                .map(version -> planner.listParameterNames(tenantId, version, query))
+                .orElseGet(java.util.Set::of);
+    }
+
+    /** The named queries this pipeline's source offers, for the run dialog's picker. */
+    public java.util.List<String> runQueryNames(PipelineId pipelineId) {
+        TenantId tenantId = tenantContext.currentTenant();
+
+        return pipelines.findById(tenantId, pipelineId)
+                .flatMap(Pipeline::publishedVersionNumber)
+                .flatMap(number -> versions.findByNumber(tenantId, pipelineId, number))
+                .map(version -> planner.queryNames(tenantId, version))
+                .orElseGet(java.util.List::of);
     }
 
     /**
@@ -156,6 +183,18 @@ public class RunOrchestrator {
      */
     public Run start(PipelineId pipelineId, RunTrigger trigger, String idempotencyKey,
                      com.fasterxml.jackson.databind.JsonNode parameters, boolean dryRun) {
+        return start(pipelineId, trigger, idempotencyKey, parameters, dryRun, null);
+    }
+
+    /**
+     * Starts a run that selects records with one of the source's named queries.
+     *
+     * <p>The name is stored on the run, so a retry hours later repeats the same selection rather
+     * than whatever the default has become — the same reasoning that put the parameters there.
+     */
+    public Run start(PipelineId pipelineId, RunTrigger trigger, String idempotencyKey,
+                     com.fasterxml.jackson.databind.JsonNode parameters, boolean dryRun,
+                     String queryName) {
         TenantId tenantId = tenantContext.currentTenant();
         Instant now = clock.instant();
 
@@ -187,7 +226,7 @@ public class RunOrchestrator {
 
         Run run = runs.create(Run.create(tenantId, pipelineId, version.id(), versionNumber,
                 version.mode(), trigger, idempotencyKey, tenantContext.currentActor(), null,
-                parameters, dryRun, now));
+                parameters, dryRun, queryName, now));
 
         auditLog.record(AuditEntry.of(tenantId, tenantContext.currentActor(), AuditAction.RUN_START,
                 "run", run.id().toString(),

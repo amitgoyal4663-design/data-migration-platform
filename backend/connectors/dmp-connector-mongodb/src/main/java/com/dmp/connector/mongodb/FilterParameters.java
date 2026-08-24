@@ -61,6 +61,41 @@ final class FilterParameters {
      *
      * @throws ConnectorException naming any placeholder nothing supplied a value for
      */
+    /**
+     * The placeholders that take a list, read out of the filter itself.
+     *
+     * <p>An operator that compares against a set — {@code $in}, {@code $nin}, {@code $all} — takes
+     * an array, and a placeholder underneath one is therefore plural. Nothing else in a filter is.
+     */
+    static Set<String> listsIn(String filterJson) {
+        Set<String> names = new LinkedHashSet<>();
+        if (filterJson == null || filterJson.isBlank()) {
+            return names;
+        }
+        try {
+            collectLists(Document.parse(filterJson), false, names);
+        } catch (RuntimeException e) {
+            return Set.of();
+        }
+        return names;
+    }
+
+    private static void collectLists(Object value, boolean underSetOperator, Set<String> names) {
+        if (value instanceof Document document) {
+            document.forEach((key, nested) ->
+                    collectLists(nested, SET_OPERATORS.contains(key), names));
+        } else if (value instanceof List<?> list) {
+            list.forEach(nested -> collectLists(nested, underSetOperator, names));
+        } else if (underSetOperator && value instanceof String text) {
+            var matcher = PLACEHOLDER.matcher(text);
+            if (matcher.matches()) {
+                names.add(matcher.group(1));
+            }
+        }
+    }
+
+    private static final Set<String> SET_OPERATORS = Set.of("$in", "$nin", "$all");
+
     static Document bind(Document filter, JsonNode supplied) {
         List<String> missing = new ArrayList<>();
         Document bound = substitute(filter, supplied, missing);
@@ -124,8 +159,12 @@ final class FilterParameters {
         String name = matcher.group(1);
         JsonNode bound = supplied == null ? null : supplied.get(name);
 
+        // An empty list counts as missing, and deliberately: "$in: []" matches nothing and
+        // completes as a successful run that moved zero records, which is the exact failure the
+        // refusal below exists to prevent.
         if (bound == null || bound.isNull()
-                || (bound.isTextual() && bound.asText().isBlank())) {
+                || (bound.isTextual() && bound.asText().isBlank())
+                || (bound.isArray() && bound.isEmpty())) {
             missing.add(name);
             return value;
         }
@@ -140,6 +179,17 @@ final class FilterParameters {
      * without anybody declaring a type on the filter.
      */
     private static Object typed(JsonNode value) {
+        // A list, for $in. The only parameter shape that is plural, and the one that makes
+        // "find these ten policies" expressible as a filter rather than as a feature.
+        //
+        // Each element is typed on its own rather than the list being taken as strings: a list of
+        // numeric ids compared against a numeric field matches nothing when its members arrive as
+        // text, and does so without an error.
+        if (value.isArray()) {
+            List<Object> values = new ArrayList<>(value.size());
+            value.forEach(element -> values.add(typed(element)));
+            return values;
+        }
         if (value.isBoolean()) {
             return value.asBoolean();
         }

@@ -22,7 +22,14 @@ public final class RunDtos {
     /** The placeholders a pipeline's source query expects, in the order they appear. */
     public record ParameterNames(
             @Schema(description = "e.g. [\"from\", \"to\"]. Empty when the query takes none.")
-            java.util.List<String> names) {
+            java.util.List<String> names,
+            @Schema(description = "Those of the above that take several values, because the query "
+                    + "uses them inside IN (…) or $in. Sent as an array rather than a string.")
+            java.util.List<String> lists) {
+
+        public ParameterNames(java.util.List<String> names) {
+            this(names, java.util.List.of());
+        }
     }
 
     /**
@@ -40,7 +47,10 @@ public final class RunDtos {
                     + "is never opened, so nothing is created and no quota is spent — which also "
                     + "means a dry run cannot tell you the destination would have accepted the "
                     + "records, only what would have been sent and which never got that far.")
-            boolean dryRun) {
+            boolean dryRun,
+            @Schema(description = "Which of the source's named queries to select records with, "
+                    + "for example \"By policy number\". Omit for the connector's own query.")
+            String query) {
 
         public StartRequest {
             parameters = com.dmp.common.json.Json.orEmpty(parameters);
@@ -84,6 +94,9 @@ public final class RunDtos {
                     + "index entries are deliberately absent, because \"would have been "
                     + "transferred\" must never be searchable as \"was transferred\".")
             boolean dryRun,
+            @Schema(description = "The named query this run selected records with. Null for the "
+                    + "connector's own — which is what every run before this feature used.")
+            String query,
             String errorCode,
             String errorMessage,
             String triggeredBy,
@@ -120,7 +133,7 @@ public final class RunDtos {
         public Response carrying(List<Response> chain) {
             return new Response(id, pipelineId, pipelineVersionId, versionNumber, mode, trigger,
                     retryOf, chain, state, active, terminal, waitingOnExternalSystem, metrics,
-                    progress, durationSeconds, parameters, dryRun, errorCode, errorMessage,
+                    progress, durationSeconds, parameters, dryRun, query, errorCode, errorMessage,
                     triggeredBy, createdAt, startedAt, endedAt);
         }
 
@@ -144,6 +157,7 @@ public final class RunDtos {
                     run.duration(now).map(java.time.Duration::toSeconds).orElse(null),
                     run.parameters(),
                     run.dryRun(),
+                    run.queryName(),
                     run.errorCode(),
                     run.errorMessage(),
                     run.triggeredBy(),

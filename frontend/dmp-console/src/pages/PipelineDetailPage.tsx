@@ -41,6 +41,7 @@ import {
   useRunParameterNames,
   useRuns,
   useMonitorPipeline,
+  useRunQueries,
   useStartRun,
   useVersions,
 } from '@/api/hooks'
@@ -102,6 +103,12 @@ export function PipelineDetailPage() {
   const [dryRun, setDryRun] = useState(false)
   const copyVersion = useCopyVersion(pipelineId)
   const runParameters = useRunParameterNames(pipelineId)
+  const runQueries = useRunQueries(pipelineId)
+
+  // Asked whenever there is a choice to make: a named query to pick, or a placeholder to fill.
+  // A pipeline with neither still starts on one click, exactly as it always did.
+  const needsDialog =
+    (runParameters.data?.names.length ?? 0) > 0 || (runQueries.data?.names.length ?? 0) > 0
   const [askingParameters, setAskingParameters] = useState(false)
 
   if (pipeline.isLoading) return <Loading />
@@ -207,7 +214,7 @@ export function PipelineDetailPage() {
               startIcon={<ScienceIcon />}
               disabled={!current.runnable || startRun.isPending}
               onClick={() => {
-                if ((runParameters.data?.names.length ?? 0) > 0) {
+                if (needsDialog) {
                   setDryRun(true)
                   setAskingParameters(true)
                   return
@@ -227,7 +234,7 @@ export function PipelineDetailPage() {
               onClick={() => {
                 // A pipeline whose query takes no parameters starts immediately, as it always
                 // has. Only one that needs values stops to ask for them.
-                if ((runParameters.data?.names.length ?? 0) > 0) {
+                if (needsDialog) {
                   setDryRun(false)
                   setAskingParameters(true)
                   return
@@ -246,13 +253,13 @@ export function PipelineDetailPage() {
 
       <RunDialog
         open={askingParameters}
-        names={runParameters.data?.names ?? []}
+        pipelineId={pipelineId}
         pending={startRun.isPending}
         dryRun={dryRun}
         onCancel={() => setAskingParameters(false)}
-        onStart={(parameters) =>
+        onStart={(parameters, query) =>
           startRun.mutate(
-            { pipelineId, parameters, dryRun },
+            { pipelineId, parameters, dryRun, query },
             {
               onSuccess: (run) => {
                 setAskingParameters(false)

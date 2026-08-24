@@ -58,7 +58,14 @@ public class ConnectorContexts {
     /** A context outside chunk execution, carrying the run's query parameters. */
     public ConnectorContext forInstance(ConnectorInstance instance, String runId, String workerId,
                                         JsonNode parameters) {
-        return forChunk(instance, runId, workerId, ConnectorContext.NO_CHUNK, false, parameters);
+        return forInstance(instance, runId, workerId, parameters, null);
+    }
+
+    /** Outside a chunk — a connection test, a preview — using one of the named queries. */
+    public ConnectorContext forInstance(ConnectorInstance instance, String runId, String workerId,
+                                        JsonNode parameters, String queryName) {
+        return forChunk(instance, runId, workerId, ConnectorContext.NO_CHUNK, false, parameters,
+                queryName);
     }
 
     /**
@@ -75,13 +82,28 @@ public class ConnectorContexts {
 
     public ConnectorContext forChunk(ConnectorInstance instance, String runId, String workerId,
                                      int chunkIndex, boolean resuming, JsonNode parameters) {
+        return forChunk(instance, runId, workerId, chunkIndex, resuming, parameters, null);
+    }
+
+    /**
+     * The context a session is opened with, using one of the instance's named queries.
+     *
+     * <p>The variant is merged over the configuration <em>here</em>, before any connector sees it,
+     * which is the whole reason this feature costs no connector changes: a connector receives a
+     * configuration in exactly the shape it always received, with its {@code sql} or {@code filter}
+     * being whichever one the run chose. It never learns that alternatives existed.
+     */
+    public ConnectorContext forChunk(ConnectorInstance instance, String runId, String workerId,
+                                     int chunkIndex, boolean resuming, JsonNode parameters,
+                                     String queryName) {
         Logger log = LoggerFactory.getLogger(
                 "connector." + instance.connectorType() + "." + instance.name());
 
         // Resolved once, at session open, rather than on each config() call. A missing environment
         // variable then fails when the session opens — before a chunk claims work — instead of
         // halfway through whatever the connector happened to read first.
-        JsonNode resolvedConfig = resolveConfig(instance, log);
+        JsonNode resolvedConfig = com.dmp.connector.api.QueryVariants.apply(
+                resolveConfig(instance, log), queryName);
 
         return new ConnectorContext() {
 

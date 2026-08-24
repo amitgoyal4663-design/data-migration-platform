@@ -91,11 +91,28 @@ public class MongoConnector implements Source, Sink {
      * — the collection and the key field do not.
      */
     @Override
+    public java.util.Set<String> listParameterNames(JsonNode config) {
+        return FilterParameters.listsIn(filterJson(config));
+    }
+
+    @Override
     public java.util.Set<String> parameterNames(JsonNode config) {
+        return FilterParameters.referencedBy(filterJson(config));
+    }
+
+    /**
+     * The filter as JSON text, whether it was written as a string or as an object.
+     *
+     * <p>It was a string because the console renders a text box from the connector's schema. A
+     * named query is written by hand, and written by hand nobody escapes a JSON document into a
+     * string — so both are accepted, and the difference stops mattering anywhere else.
+     */
+    private static String filterJson(JsonNode config) {
         JsonNode filter = config == null ? null : config.get("filter");
-        return filter == null || filter.isNull()
-                ? java.util.Set.of()
-                : FilterParameters.referencedBy(filter.asText());
+        if (filter == null || filter.isNull()) {
+            return null;
+        }
+        return filter.isObject() || filter.isArray() ? filter.toString() : filter.asText();
     }
 
     @Override
@@ -748,7 +765,7 @@ public class MongoConnector implements Source, Sink {
                     text(config, "connectionString", null),
                     text(config, "database", null),
                     required(config, "collection"),
-                    text(config, "filter", null),
+                    MongoConnector.filterJson(config),
                     parseWriteMode(text(config, "writeMode", "INSERT")),
                     text(config, "keyField", "_id"),
                     text(config, "authDatabase", "admin"));

@@ -87,6 +87,17 @@ public class RunPlanner {
      * itself will fail with a far better message.
      */
     public Set<String> parameterNames(TenantId tenantId, PipelineVersion version) {
+        return parameterNames(tenantId, version, null);
+    }
+
+    /**
+     * The placeholders one of the source's named queries expects.
+     *
+     * <p>Per query, because that is the point of them: "by date range" wants a from and a to, "by
+     * policy number" wants a list of policy numbers, and a dialog that asked for all three would be
+     * asking for values two of which cannot be used.
+     */
+    public Set<String> parameterNames(TenantId tenantId, PipelineVersion version, String query) {
         try {
             NodeDefinition source = version.definition().nodesOfType(NodeType.SOURCE).stream()
                     .findFirst().orElse(null);
@@ -98,11 +109,60 @@ public class RunPlanner {
             if (instance == null) {
                 return Set.of();
             }
-            return connectors.source(instance.connectorType()).parameterNames(instance.config());
+            // The variant is merged first, so the connector reads placeholders out of the query
+            // that will actually run — it never learns that others were on offer.
+            return connectors.source(instance.connectorType()).parameterNames(
+                    com.dmp.connector.api.QueryVariants.apply(instance.config(), query));
         } catch (RuntimeException e) {
             log.debug("Could not determine run parameters for version {}: {}",
                     version.id(), e.getMessage());
             return Set.of();
+        }
+    }
+
+    /** Which of those placeholders take a list, so the dialog offers a list rather than a box. */
+    public Set<String> listParameterNames(TenantId tenantId, PipelineVersion version, String query) {
+        try {
+            NodeDefinition source = version.definition().nodesOfType(NodeType.SOURCE).stream()
+                    .findFirst().orElse(null);
+            if (source == null || source.connectorInstanceId() == null) {
+                return Set.of();
+            }
+            ConnectorInstance instance = connectorInstances.findById(tenantId,
+                    ConnectorInstanceId.of(source.connectorInstanceId())).orElse(null);
+            if (instance == null) {
+                return Set.of();
+            }
+            return connectors.source(instance.connectorType()).listParameterNames(
+                    com.dmp.connector.api.QueryVariants.apply(instance.config(), query));
+        } catch (RuntimeException e) {
+            log.debug("Could not determine run parameters for version {}: {}",
+                    version.id(), e.getMessage());
+            return Set.of();
+        }
+    }
+
+    /**
+     * The named queries this pipeline's source offers, in declaration order.
+     *
+     * <p>Empty for a source that declares none, which is every one written before they existed —
+     * and the run dialog then shows no picker, exactly as it did.
+     */
+    public java.util.List<String> queryNames(TenantId tenantId, PipelineVersion version) {
+        try {
+            NodeDefinition source = version.definition().nodesOfType(NodeType.SOURCE).stream()
+                    .findFirst().orElse(null);
+            if (source == null || source.connectorInstanceId() == null) {
+                return java.util.List.of();
+            }
+            return connectorInstances
+                    .findById(tenantId, ConnectorInstanceId.of(source.connectorInstanceId()))
+                    .map(instance -> com.dmp.connector.api.QueryVariants.names(instance.config()))
+                    .orElseGet(java.util.List::of);
+        } catch (RuntimeException e) {
+            log.debug("Could not read the query names for version {}: {}",
+                    version.id(), e.getMessage());
+            return java.util.List.of();
         }
     }
 
@@ -124,7 +184,8 @@ public class RunPlanner {
                 .findAllById(run.tenantId(), referenced).stream()
                 .collect(Collectors.toMap(instance -> instance.id().toString(), Function.identity()));
 
-        return ResolvedPipeline.resolve(version, instances, run.parameters(), run.dryRun());
+        return ResolvedPipeline.resolve(version, instances, run.parameters(), run.dryRun(),
+                run.queryName());
     }
 
     /**
@@ -180,7 +241,7 @@ public class RunPlanner {
     public int planChunks(Run run, ResolvedPipeline pipeline, Preparation preparation, String workerId) {
         ConnectorContext context = contexts.forInstance(
                 pipeline.sourceInstance(), run.id().toString(), workerId,
-                pipeline.runParameters());
+                pipeline.runParameters(), pipeline.queryName());
         Source source = connectors.source(pipeline.sourceInstance().connectorType());
 
         // Chunk size, derived from the pipeline's read size unless set explicitly. Size rather

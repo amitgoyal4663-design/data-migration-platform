@@ -38,6 +38,7 @@ public final class RunMapper {
                 JsonDocuments.toJson(doc.getPreparationState()),
                 JsonDocuments.toJson(doc.getParameters()),
                 Boolean.TRUE.equals(doc.getDryRun()),
+                doc.getQueryName(),
                 doc.getErrorCode(),
                 doc.getErrorMessage(),
                 doc.getTriggeredBy(),
@@ -60,6 +61,7 @@ public final class RunMapper {
         doc.setRetryOf(run.retryOf() == null ? null : run.retryOf().value());
         doc.setState(run.state().name());
         doc.setDryRun(run.dryRun());
+        doc.setQueryName(run.queryName());
         doc.setIdempotencyKey(run.idempotencyKey());
         doc.setMetrics(toMetricsMap(run.metrics()));
         doc.setActiveSlots(run.activeSlots());
