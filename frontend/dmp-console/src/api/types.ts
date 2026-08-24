@@ -613,6 +613,8 @@ export interface Run {
   durationSeconds: number | null
   /** Values bound into the source's query — the range this run actually covered. */
   parameters: Record<string, unknown> | null
+  /** Which of the source's named queries selected the records. Null when it offers none. */
+  query: string | null
   errorCode: string | null
   errorMessage: string | null
   triggeredBy: string | null

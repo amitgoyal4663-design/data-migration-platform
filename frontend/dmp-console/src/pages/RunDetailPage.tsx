@@ -50,6 +50,7 @@ import { ReconciliationPanel } from '@/components/ReconciliationPanel'
 import { RunTimeline } from '@/components/RunTimeline'
 import { PageHeader } from '@/components/PageHeader'
 import { StatTile } from '@/components/StatTile'
+import { RunSelection } from '@/components/RunSelection'
 import { ChunkStateChip, RunStateChip } from '@/components/StateChip'
 import { ErrorPanel, Loading } from '@/components/Feedback'
 import { formatDuration } from './DashboardPage'
@@ -194,18 +195,9 @@ export function RunDetailPage() {
               {current.triggeredBy ? ` by ${current.triggeredBy}` : ''}
             </Typography>
             {/*
-              What this run actually covered. Shown beside the state rather than buried, because
-              with a range on every run the run list becomes a coverage log — and a missing window
-              is only visible if each run says which one it took.
+              What this run covered is in its own panel below, not here. A subtitle can hold a date
+              range; it cannot hold two hundred policy numbers, and it was silently trying to.
             */}
-            {current.parameters && Object.keys(current.parameters).length > 0 && (
-              <Typography variant="body2" sx={{ color: muted }}>
-                · covered{' '}
-                {Object.entries(current.parameters)
-                  .map(([name, value]) => `${name} ${String(value)}`)
-                  .join(' → ')}
-              </Typography>
-            )}
             {current.retryOf && (
               <Typography variant="body2" sx={{ color: muted }}>
                 · {current.trigger === 'REPLAY' ? 'replay of' : 'retry of'}{' '}
@@ -300,6 +292,8 @@ export function RunDetailPage() {
         * that was rehearsed and not delivered, and somebody reading "10,000 written" without this
         * line has been told something untrue.
         */}
+      <RunSelection query={current.query} parameters={current.parameters} />
+
       {current.dryRun && (
         <Alert severity="warning" sx={{ mb: 3 }}>
           <AlertTitle>Dry run — nothing was written</AlertTitle>

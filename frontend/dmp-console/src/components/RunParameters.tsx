@@ -28,8 +28,8 @@ export function RunParameters({
     )
   }
 
-  const full = entries.map(([name, value]) => `${name}: ${String(value)}`).join('\n')
-  const short = entries.map(([, value]) => shorten(String(value))).join(' → ')
+  const full = entries.map(([name, value]) => `${name}: ${describe(value)}`).join('\n')
+  const short = entries.map(([, value]) => cell(value)).join(' → ')
 
   return (
     <Tooltip title={<span style={{ whiteSpace: 'pre-line' }}>{full}</span>}>
@@ -38,6 +38,30 @@ export function RunParameters({
       </Typography>
     </Tooltip>
   )
+}
+
+/**
+ * A list as its size, anything else as itself.
+ *
+ * <p>A list of two hundred policy numbers has no useful short form: the first twenty-three
+ * characters of it are three policy numbers and a lie about the rest. The count is the fact that
+ * belongs in a column — the values themselves are on the run, in a panel that can hold them.
+ */
+function cell(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `${value.length} value${value.length === 1 ? '' : 's'}`
+  }
+  return shorten(String(value))
+}
+
+/** The same, for the hover — a few values named, and an honest count of the rest. */
+function describe(value: unknown): string {
+  if (!Array.isArray(value)) {
+    return String(value)
+  }
+  const shown = value.slice(0, 8).map(String)
+  const hidden = value.length - shown.length
+  return hidden > 0 ? `${shown.join(', ')} and ${hidden} more` : shown.join(', ')
 }
 
 /**
