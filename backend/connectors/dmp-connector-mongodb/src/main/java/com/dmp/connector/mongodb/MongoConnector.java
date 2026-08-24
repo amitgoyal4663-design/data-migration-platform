@@ -589,7 +589,7 @@ public class MongoConnector implements Source, Sink {
 
         if (username.isPresent() && password.isPresent()) {
             settings.credential(MongoCredential.createCredential(
-                    username.get(), config.authDatabase(), password.get().toCharArray()));
+                    username.get(), authSource(uri), password.get().toCharArray()));
         }
         return MongoClients.create(settings.build());
     }
@@ -636,16 +636,38 @@ public class MongoConnector implements Source, Sink {
         return Filters.eq(keyField, key);
     }
 
+    /**
+     * Where the separate username and password authenticate, read from the URI's {@code authSource}.
+     *
+     * <p>It had its own field, and a field is a second place for one answer to live: a URI saying
+     * {@code ?authSource=admin} beside a box saying something else is a disagreement nothing
+     * resolves out loud. Defaults to admin, which is where a MongoDB user is defined unless
+     * somebody decided otherwise — and somebody who decided otherwise says so in the URI, next to
+     * the host it applies to.
+     */
+    private static String authSource(String uri) {
+        int query = uri.indexOf('?');
+        if (query >= 0) {
+            for (String pair : uri.substring(query + 1).split("&")) {
+                int equals = pair.indexOf('=');
+                if (equals > 0 && pair.substring(0, equals).trim().equalsIgnoreCase("authSource")) {
+                    String value = pair.substring(equals + 1).trim();
+                    if (!value.isBlank()) {
+                        return value;
+                    }
+                }
+            }
+        }
+        return "admin";
+    }
+
     private static MongoCollection<Document> collection(MongoClient client, MongoConfig config) {
-        String database = config.database();
+        String database = new ConnectionString(config.connectionString()).getDatabase();
 
         if (database == null || database.isBlank()) {
-            database = new ConnectionString(config.connectionString()).getDatabase();
-        }
-        if (database == null || database.isBlank()) {
             throw new ConnectorException(ConnectorException.Kind.CONFIGURATION,
-                    "This connection names no database. Either put one in the connection string — "
-                            + "mongodb://host:27017/orders — or set the 'database' field.");
+                    "This connection names no database. Put one in the connection string, after "
+                            + "the host — mongodb://host:27017/orders.");
         }
         return client.getDatabase(database).getCollection(config.collection());
     }
@@ -695,8 +717,6 @@ public class MongoConnector implements Source, Sink {
         properties.set("collection", field("string",
                 "Collection to read or write. A URI cannot carry this, so it is named here."));
 
-        properties.set("database", ConfigFields.advanced(field("string",
-                "Database, when the connection string does not already name one.")));
         properties.set("filter", ConfigFields.selectionField(
                 ConfigFields.advanced(ConfigFields.sourceField("string",
                 "MongoDB query as JSON, to migrate a subset rather than the whole collection — for "
@@ -704,9 +724,6 @@ public class MongoConnector implements Source, Sink {
                         + "supplied per run, so {\"updatedAt\": {\"$gt\": \":from\", "
                         + "\"$lte\": \":to\"}} reads a window a schedule or the Run dialog "
                         + "decides. Empty reads everything."))));
-        properties.set("authDatabase", ConfigFields.advanced(field("string",
-                "Database the separate username and password authenticate against. Ignored when "
-                        + "the connection string carries its own credentials. Defaults to admin.")));
 
         // Deliberately not advanced. writeMode decides whether a retried chunk duplicates what it
         // already wrote, which is the most consequential answer on this form — burying it under a
@@ -743,12 +760,10 @@ public class MongoConnector implements Source, Sink {
     /** Typed view over the MongoDB connector's configuration. */
     private record MongoConfig(
             String connectionString,
-            String database,
             String collection,
             String filterJson,
             WriteMode writeMode,
-            String keyField,
-            String authDatabase) {
+            String keyField) {
 
         enum WriteMode {
             /** Plain insert. Fastest, and a retry duplicates. */
@@ -764,12 +779,10 @@ public class MongoConnector implements Source, Sink {
 
             return new MongoConfig(
                     text(config, "connectionString", null),
-                    text(config, "database", null),
                     required(config, "collection"),
                     MongoConnector.filterJson(config),
                     parseWriteMode(text(config, "writeMode", "INSERT")),
-                    text(config, "keyField", "_id"),
-                    text(config, "authDatabase", "admin"));
+                    text(config, "keyField", "_id"));
         }
 
         /**
@@ -822,20 +835,20 @@ public class MongoConnector implements Source, Sink {
         /**
          * Names the collection as the connection actually resolves it.
          *
-         * <p>Reads the database from the URI when the field is unset, because that is where it now
-         * comes from — otherwise every log line about this connection said "null.orders", which
-         * reads like a bug in the place you go looking when there is one.
+         * <p>Says so explicitly when the URI names no database, because every log line about such a
+         * connection otherwise said "null.orders" — which reads like a bug in the connector, in the
+         * place you go looking when there is one.
          */
         String describe() {
-            String named = database;
-            if ((named == null || named.isBlank()) && connectionString != null) {
+            String named = null;
+            if (connectionString != null) {
                 try {
                     named = new ConnectionString(connectionString).getDatabase();
                 } catch (RuntimeException e) {
                     named = null;
                 }
             }
-            return (named == null || named.isBlank() ? "(database from the connection string)" : named)
+            return (named == null || named.isBlank() ? "(no database in the connection string)" : named)
                     + "." + collection;
         }
 
