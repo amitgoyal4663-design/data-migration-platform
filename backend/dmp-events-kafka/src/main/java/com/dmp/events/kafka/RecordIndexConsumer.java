@@ -83,9 +83,51 @@ public class RecordIndexConsumer {
      */
     @EventListener(ApplicationReadyEvent.class)
     public void start() {
-        worker = new Thread(this::consume, "dmp-record-indexer");
+        worker = new Thread(this::run, "dmp-record-indexer");
         worker.setDaemon(true);
         worker.start();
+    }
+
+    /**
+     * Keeps a consumer running, and starts a new one when the old one cannot continue.
+     *
+     * <p>Without this the thread ended on its first unrecoverable error and never returned. Which
+     * sounds acceptable until you see what "unrecoverable" turned out to include: a commit refused
+     * because a slow OpenSearch had held the poll loop long enough for Kafka to evict this consumer
+     * from its group. A transient outage downstream thereby stopped the indexer permanently, and
+     * the only symptom was a growing lag on a topic every run was still writing to.
+     *
+     * <p>So an error here ends an attempt, not the component. Backed off so a broker that is truly
+     * gone is not hammered, and logged each time so a consumer failing in a loop is visible rather
+     * than merely slow.
+     */
+    private void run() {
+        long backoffSeconds = 5;
+        while (running.get()) {
+            try {
+                consume();
+                backoffSeconds = 5;
+            } catch (org.apache.kafka.common.errors.InterruptException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Exception e) {
+                log.error("The record index consumer failed and will restart in {}s: topic '{}' on "
+                                + "{} ({}). Entries already produced are still on the topic and "
+                                + "nothing is lost; the record search is behind until this clears.",
+                        backoffSeconds, properties.recordIndexTopic(),
+                        properties.bootstrapServers(), e.getMessage(), e);
+            }
+            if (!running.get()) {
+                return;
+            }
+            try {
+                Thread.sleep(Duration.ofSeconds(backoffSeconds).toMillis());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            backoffSeconds = Math.min(backoffSeconds * 2, 60);
+        }
     }
 
     private void consume() {
@@ -123,19 +165,10 @@ public class RecordIndexConsumer {
                 if (records.isEmpty()) {
                     continue;
                 }
-                if (indexBatch(records)) {
+                if (indexBatch(consumer, records)) {
                     consumer.commitSync();
                 }
             }
-        } catch (org.apache.kafka.common.errors.InterruptException e) {
-            Thread.currentThread().interrupt();
-        } catch (Exception e) {
-            log.error("The record index consumer stopped: topic '{}' on {} could not be consumed "
-                            + "({}). Record-index entries are being written to that topic and "
-                            + "nothing is draining it, so the record search will fall behind and "
-                            + "stay behind until this is fixed. The topic must exist — this "
-                            + "platform never creates one.",
-                    properties.recordIndexTopic(), properties.bootstrapServers(), e.getMessage(), e);
         }
     }
 
@@ -144,7 +177,8 @@ public class RecordIndexConsumer {
      *
      * @return whether the batch is safely in OpenSearch and its offset may be committed
      */
-    private boolean indexBatch(ConsumerRecords<String, String> records) {
+    private boolean indexBatch(KafkaConsumer<String, String> consumer,
+                               ConsumerRecords<String, String> records) {
         List<RecordIndexPort.RecordIndexEntry> entries = new ArrayList<>(records.count());
         for (ConsumerRecord<String, String> record : records) {
             try {
@@ -160,6 +194,7 @@ public class RecordIndexConsumer {
             return true;
         }
 
+        long attempt = 0;
         while (running.get()) {
             try {
                 openSearch.indexAll(entries);
@@ -168,21 +203,55 @@ public class RecordIndexConsumer {
                     loggedAt = indexed;
                     log.info("Record index: {} entries indexed", indexed);
                 }
+                consumer.resume(consumer.assignment());
                 return true;
             } catch (Exception e) {
-                log.warn("OpenSearch would not take {} record index entries ({}). Retrying in {}s; "
-                                + "the offset stays where it is, so nothing is lost — the index is "
-                                + "behind until this clears.",
-                        entries.size(), e.getMessage(), RETRY_PAUSE.toSeconds());
-                try {
-                    Thread.sleep(RETRY_PAUSE.toMillis());
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
+                attempt++;
+                // Sparse after the first few: an outage lasting an hour must not write seven
+                // hundred identical lines, and the state it describes has not changed.
+                if (attempt <= 3 || attempt % 60 == 0) {
+                    log.warn("OpenSearch would not take {} record index entries, attempt {} ({}). "
+                                    + "The offset stays where it is, so nothing is lost — the "
+                                    + "index is behind until this clears.",
+                            entries.size(), attempt, e.getMessage());
+                }
+                if (!waitInGroup(consumer)) {
                     return false;
                 }
             }
         }
         return false;
+    }
+
+    /**
+     * Waits before the next attempt <em>without leaving the consumer group</em>.
+     *
+     * <p>This is the whole fix, and the bug it replaces was subtle enough to be worth naming.
+     * Sleeping here meant not calling {@code poll}, and a consumer that does not poll within
+     * {@code max.poll.interval.ms} is evicted — so a downstream outage lasting a few minutes got
+     * this consumer thrown out of its own group, and the commit that followed the eventual success
+     * was refused because it no longer belonged to one. The entries had been indexed; the offset
+     * could not be moved past them; the thread died.
+     *
+     * <p>Pausing the assignment and polling anyway is the arrangement Kafka provides for exactly
+     * this: the poll returns nothing because every partition is paused, and it still heartbeats,
+     * so membership survives an outage of any length. The batch is retried from the same offsets
+     * because nothing was committed.
+     *
+     * @return whether to attempt again, or give up because the consumer is shutting down
+     */
+    private boolean waitInGroup(KafkaConsumer<String, String> consumer) {
+        consumer.pause(consumer.assignment());
+        long deadline = System.nanoTime() + RETRY_PAUSE.toNanos();
+        try {
+            while (running.get() && System.nanoTime() < deadline) {
+                consumer.poll(Duration.ofMillis(200));
+            }
+        } catch (org.apache.kafka.common.errors.InterruptException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        return running.get();
     }
 
     /** One message back into the entry it was made from. */
