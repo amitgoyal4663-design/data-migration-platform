@@ -12,8 +12,8 @@ Nothing else. No Java, no Maven, no Node, no Python — every build happens insi
 ## The command
 
 ```bash
-git clone <this repo>
-cd "Data Migration"
+git clone https://github.com/amitgoyal4663-design/data-migration-platform.git
+cd data-migration-platform
 make stack
 ```
 
