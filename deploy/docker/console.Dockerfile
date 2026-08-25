@@ -28,7 +28,12 @@ COPY deploy/docker/nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
 
+# 127.0.0.1, not localhost. wget resolves localhost to ::1 first and nginx listens on IPv4 only,
+# so the check failed against a server that was serving perfectly — the container reported
+# unhealthy for its whole life while every request to it succeeded. That matters more than it
+# sounds: the quickstart tells people to judge readiness by `make ps`, so the first thing somebody
+# setting this up saw was a permanently broken console that was not broken.
 HEALTHCHECK --interval=15s --timeout=3s --retries=3 \
-    CMD wget -qO- http://localhost/ >/dev/null || exit 1
+    CMD wget -qO- http://127.0.0.1/ >/dev/null || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]
