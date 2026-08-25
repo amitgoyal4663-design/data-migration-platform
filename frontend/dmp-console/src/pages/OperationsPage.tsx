@@ -31,6 +31,7 @@ import {
 import { ErrorPanel, Loading } from '@/components/Feedback'
 import { OperationsControls, applyFilters } from '@/components/OperationsControls'
 import type { OperationsFilters, SortOrder, StatusFilter } from '@/components/OperationsControls'
+import { AlertBar, AlertsDrawer } from '@/components/OperationsAlerts'
 import { OperationsEngineering } from '@/components/OperationsEngineering'
 import { OperationsProduct, ProductTotals } from '@/components/OperationsProduct'
 import { PageHeader } from '@/components/PageHeader'
@@ -39,7 +40,6 @@ import { RunStateChip } from '@/components/StateChip'
 import { muted, tabular } from '@/theme'
 import type {
   OperationsAttempt,
-  OperationsHeadline,
   OperationsLiveRun,
   OperationsTotals,
   PipelineHealth,
@@ -79,6 +79,7 @@ const VIEWS: { value: View; label: string; caption: string }[] = [
 
 export function OperationsPage() {
   const [params, setParams] = useSearchParams()
+  const [alertsOpen, setAlertsOpen] = useState(false)
 
   // Read from the URL rather than from state, so a filtered screen is a link. Half of support work
   // is one person showing another what they are looking at, and "failures first, last seven days,
@@ -157,9 +158,20 @@ export function OperationsPage() {
         total={pipelines.length}
       />
 
+      {/*
+        On every view, not only Support. A product team reading volumes and an engineer reading
+        causes are both entitled to know that two jobs are on fire, and one line is small enough to
+        say so everywhere without taking the screen.
+      */}
+      <AlertBar headlines={headlines} jobs={pipelines.length} onOpen={() => setAlertsOpen(true)} />
+      <AlertsDrawer
+        open={alertsOpen}
+        headlines={headlines}
+        onClose={() => setAlertsOpen(false)}
+      />
+
       {view === 'support' && (
         <>
-          <Headlines headlines={headlines} />
           <Highlights totals={totals} />
           {live.length > 0 && <RunningNow runs={live} />}
 
@@ -217,135 +229,6 @@ export function OperationsPage() {
  * The first is given the room, because a strip where everything is the same size is a strip
  * where nothing is first.
  */
-function Headlines({ headlines }: { headlines: OperationsHeadline[] }) {
-  if (headlines.length === 0) return null
-
-  return (
-    <Paper variant="outlined" sx={{ mb: 2, overflow: 'hidden' }}>
-      {headlines.map((item, index) => (
-        <HeadlineRow key={index} item={item} first={index === 0} />
-      ))}
-    </Paper>
-  )
-}
-
-const SEVERITY = {
-  CRITICAL: { label: 'CRITICAL', tone: 'error.main' },
-  WARNING: { label: 'WARNING', tone: 'warning.main' },
-  INFO: { label: '', tone: 'text.secondary' },
-} as const
-
-/**
- * One problem, in columns.
- *
- * <p>Severity, then the job, then what happened, then the evidence, then when — in that order on
- * every row, so the strip is scanned down a column rather than read as five paragraphs. The old row
- * ran them together into a sentence, which meant the eye had to parse each line to find the name.
- */
-function HeadlineRow({ item, first }: { item: OperationsHeadline; first?: boolean }) {
-  const severity = SEVERITY[item.severity]
-  const to = item.runId
-    ? `/runs/${item.runId}`
-    : item.pipelineId
-      ? `/pipelines/${item.pipelineId}`
-      : null
-
-  const line = (
-    <Box
-      sx={{
-        display: 'flex',
-        alignItems: 'baseline',
-        gap: 1.5,
-        px: 2,
-        py: 1.25,
-        borderTop: first ? undefined : '1px solid',
-        borderColor: 'divider',
-        borderLeft: 3,
-        borderLeftColor: item.severity === 'INFO' ? 'transparent' : severity.tone,
-        ...(to && { '&:hover': { bgcolor: 'action.hover' } }),
-      }}
-    >
-      {/* The word as well as the colour. One man in twelve cannot separate red from amber. */}
-      <Typography
-        variant="caption"
-        sx={{
-          color: severity.tone,
-          fontWeight: 700,
-          letterSpacing: '0.08em',
-          width: 76,
-          flexShrink: 0,
-        }}
-      >
-        {severity.label}
-      </Typography>
-
-      {/* Its own column, never part of the sentence — a name that is not a noun phrase made the
-          concatenated form read as nonsense, and a name in a fixed place can be scanned for. */}
-      <Typography
-        sx={{
-          fontWeight: 600,
-          fontSize: 15,
-          width: 220,
-          flexShrink: 0,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {item.subject ?? ''}
-      </Typography>
-
-      <Typography
-        sx={{
-          fontSize: 15,
-          color: item.severity === 'INFO' ? 'text.primary' : severity.tone,
-          flexShrink: 0,
-        }}
-      >
-        {item.headline}
-      </Typography>
-
-      <Typography
-        variant="body2"
-        sx={{
-          color: muted,
-          minWidth: 0,
-          flex: 1,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-        title={item.detail}
-      >
-        {item.detail}
-      </Typography>
-
-      {item.at && (
-        <Typography variant="caption" sx={{ ...tabular, color: muted, flexShrink: 0 }}>
-          {ago(item.at)}
-        </Typography>
-      )}
-    </Box>
-  )
-
-  return to ? (
-    <Box component={RouterLink} to={to} sx={{ display: 'block', textDecoration: 'none' }}>
-      {line}
-    </Box>
-  ) : (
-    line
-  )
-}
-
-/** How old, in the coarsest unit that is still useful. A headline without an age is undated news. */
-function ago(iso: string): string {
-  const seconds = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000)
-  if (seconds < 90) return 'just now'
-  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`
-  if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`
-  return `${Math.round(seconds / 86400)}d ago`
-}
-
 /** The figures somebody is asked for before they have opened anything. */
 function Highlights({ totals }: { totals: OperationsTotals }) {
   return (
