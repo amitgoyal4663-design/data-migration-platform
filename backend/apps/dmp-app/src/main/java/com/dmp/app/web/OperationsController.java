@@ -67,7 +67,8 @@ public class OperationsController {
                 new TotalsResponse(t.completed(), t.failed(), t.recordsRead(), t.recordsWritten(),
                         t.recordsFailed(), t.running()),
                 data.headlines().stream().map(h -> new HeadlineResponse(h.severity().name(),
-                        h.headline(), h.detail(), h.pipelineId(), h.runId())).toList(),
+                        h.subject(), h.headline(), h.detail(), h.pipelineId(), h.runId(), h.at()))
+                        .toList(),
                 data.generatedAt());
     }
 
@@ -90,8 +91,14 @@ public class OperationsController {
     }
 
     @Schema(name = "OperationsHeadline")
-    public record HeadlineResponse(String severity, String headline, String detail,
-                                   String pipelineId, String runId) {
+    public record HeadlineResponse(String severity,
+                                   @Schema(description = "The job this is about, kept separate "
+                                           + "from the sentence. Null for a line about the "
+                                           + "platform rather than one pipeline.")
+                                   String subject,
+                                   String headline, String detail, String pipelineId, String runId,
+                                   @Schema(description = "When the run it describes started")
+                                   Instant at) {
     }
 
     @Schema(name = "OperationsLiveRun")

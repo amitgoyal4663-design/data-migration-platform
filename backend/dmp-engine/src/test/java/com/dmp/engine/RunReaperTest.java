@@ -67,7 +67,8 @@ class RunReaperTest {
     void setUp() {
         tenantId = TenantId.newId();
         reaper = new RunReaper(runs, splits, planner, orchestrator, externalJobs,
-                java.time.Duration.ofMinutes(2), Clock.fixed(NOW, ZoneOffset.UTC));
+                java.time.Duration.ofMinutes(2), java.time.Duration.ofHours(6),
+                Clock.fixed(NOW, ZoneOffset.UTC));
 
         run = Run.create(tenantId, PipelineId.newId(), PipelineVersionId.newId(), 1,
                         PipelineMode.FULL_LOAD, RunTrigger.API, null, "tester", NOW)

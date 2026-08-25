@@ -78,6 +78,7 @@ public class RunReaper {
     private final RunOrchestrator orchestrator;
     private final ExternalJobPoller externalJobs;
     private final Duration externalWaitGrace;
+    private final Duration preparationTimeout;
     private final Clock clock;
 
     /** Per-run count of consecutive sweeps that saw the slot counter disagree with reality. */
@@ -89,6 +90,7 @@ public class RunReaper {
                      RunOrchestrator orchestrator,
                      ExternalJobPoller externalJobs,
                      @Value("${dmp.engine.reaper.external-wait-grace:PT2M}") Duration externalWaitGrace,
+                     @Value("${dmp.engine.reaper.preparation-timeout:PT6H}") Duration preparationTimeout,
                      Clock clock) {
         this.runs = runs;
         this.splits = splits;
@@ -96,6 +98,7 @@ public class RunReaper {
         this.orchestrator = orchestrator;
         this.externalJobs = externalJobs;
         this.externalWaitGrace = externalWaitGrace;
+        this.preparationTimeout = preparationTimeout;
         this.clock = clock;
     }
 
@@ -223,6 +226,56 @@ public class RunReaper {
      * where that path will never fire again — every chunk already terminal, or every remaining one
      * cancelled by a stop.
      */
+    /**
+     * Fails a run that has been preparing longer than any preparation takes.
+     *
+     * <p>The one stall nothing else could see. Every other sweep here reasons about chunks, and
+     * {@code completeIfFinished} returns immediately for a run that has none — so a run that never
+     * got as far as its first chunk was invisible to the only mechanism watching for stalls. Two of
+     * them sat in PREPARING for five days: planning threw before a chunk existed, the failure was
+     * recorded against a state the run had already left, and nothing looked at them again. They
+     * still appeared under "running now", which is the part that costs somebody an afternoon.
+     *
+     * <p>Six hours by default, because preparing is not idle for every source: a Salesforce bulk
+     * query or a cold Databricks warehouse legitimately takes minutes, and occasionally longer. The
+     * number is a backstop for a run that is never coming back, not a service level.
+     *
+     * <p>Only when the run has no chunks. Once planning has produced one, the run has left this
+     * situation for a different one, and the chunk lease is what watches it there.
+     *
+     * @return whether this run was failed, and should not be settled as if it were still open
+     */
+    private boolean failIfPreparationStalled(Run run) {
+        if (run.state() != RunState.PREPARING) {
+            return false;
+        }
+        Instant now = clock.instant();
+        Duration waiting = Duration.between(run.createdAt(), now);
+        if (waiting.compareTo(preparationTimeout) < 0) {
+            return false;
+        }
+        // Checked last, because it is the only part that costs a query — and only ever for a run
+        // already past the timeout.
+        if (!splits.findByRun(run.tenantId(), run.id()).isEmpty()) {
+            return false;
+        }
+
+        long hours = waiting.toHours();
+        String message = "This run spent " + (hours > 0 ? hours + "h" : waiting.toMinutes() + "m")
+                + " preparing without producing a single chunk, so it was failed rather than left "
+                + "open. Nothing was read and nothing was written. Planning failed before there was "
+                + "anything to record it against — start the run again, and if it stalls here the "
+                + "same way, the source's parameters are the first thing to check.";
+
+        return runs.transitionState(run.tenantId(), run.id(), RunState.PREPARING,
+                        run.fail("PREPARATION_TIMEOUT", message, now))
+                .map(failed -> {
+                    log.error("Run {} failed: {}", failed.id(), message);
+                    return true;
+                })
+                .orElse(false);
+    }
+
     private void settleRuns() {
         List<Run> unsettled = runs.findByStates(UNSETTLED, BATCH_SIZE);
         if (unsettled.isEmpty()) {
@@ -233,6 +286,9 @@ public class RunReaper {
         for (Run run : unsettled) {
             try {
                 reconcileSlotsIfPersistentlyWrong(run);
+                if (failIfPreparationStalled(run)) {
+                    continue;
+                }
                 orchestrator.completeIfFinished(run);
             } catch (Exception e) {
                 log.error("Could not settle run {}", run.id(), e);

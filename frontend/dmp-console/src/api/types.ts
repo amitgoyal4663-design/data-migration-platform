@@ -227,10 +227,14 @@ export interface OperationsSchedule {
 /** One line of the summary strip: a whole sentence, already interpreted. */
 export interface OperationsHeadline {
   severity: FindingSeverity
+  /** The job this is about, kept out of the sentence. Null for a line about the platform. */
+  subject: string | null
   headline: string
   detail: string
   pipelineId: string | null
   runId: string | null
+  /** When the run it describes started. */
+  at: string | null
 }
 
 export interface OperationsDashboard {

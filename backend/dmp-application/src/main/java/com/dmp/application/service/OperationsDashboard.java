@@ -198,6 +198,26 @@ public class OperationsDashboard {
      * strip people learn to see as an error box, and then the quiet mornings carry no information
      * at all.
      */
+    /** At most this many problems in the strip. Beyond it, a strip is the list it is summarising. */
+    private static final int TOP_HEADLINES = 5;
+
+    /**
+     * The screen in sentences: one line per job that has something wrong, worst first.
+     *
+     * <p><b>One line per job, not one per finding.</b> A failing run usually raises three findings
+     * — it failed, it delivered nothing, it moved less than usual — and printing each produced a
+     * strip that said the same thing three times in three registers. The worst one is the one
+     * somebody acts on; the rest are on the card.
+     *
+     * <p><b>The job's name is a field, not part of the sentence.</b> Concatenating it produced
+     * "every failure in one run failed", which is what happens when a name that is not a noun
+     * phrase meets a template that assumed one. The console renders the two separately.
+     *
+     * <p><b>Nothing here estimates.</b> A headline that said "could not deliver a tenth of its
+     * records" sat above a detail reading "10,000 of 10,000 (100%) did not arrive" — the template
+     * had a fraction written into it and the evidence underneath contradicted it. The numbers live
+     * in the detail, which computes them; the headline names the kind of problem and no more.
+     */
     private List<Headline> headlines(List<PipelineHealth> health, List<Live> live, Totals totals,
                                      Duration window) {
         List<Headline> headlines = new ArrayList<>();
@@ -205,67 +225,87 @@ public class OperationsDashboard {
                 ? "the last " + window.toHours() + " hours"
                 : "the last " + (window.toHours() / 24) + " days";
 
-        // Worst first, and only from jobs that actually have something wrong: the strip is a
-        // summary, not a second copy of the cards below it.
+        List<Headline> problems = new ArrayList<>();
         for (PipelineHealth job : health) {
-            for (Finding finding : job.findings()) {
-                if (finding.severity() == Severity.INFO) {
-                    continue;
-                }
-                headlines.add(new Headline(finding.severity(), switch (finding.code()) {
-                    case "FAILED" -> job.name() + " failed";
-                    case "UNACCOUNTED" -> job.name() + " lost records without reporting them";
-                    case "DID_NOT_RUN" -> job.name() + " was due and never started";
-                    case "NO_ROWS" -> job.name() + " ran but moved nothing";
-                    case "VOLUME_LOW" -> job.name() + " moved well below its usual volume";
-                    case "VOLUME_HIGH" -> job.name() + " moved far more than usual";
-                    case "REJECTIONS" -> job.name() + " could not deliver a tenth of its records";
-                    case "SLOW" -> job.name() + " is taking far longer than usual";
-                    default -> job.name() + " needs attention";
-                }, finding.message(), job.pipelineId(),
-                        job.latest() == null ? null : job.latest().id().toString()));
-            }
+            job.findings().stream()
+                    .filter(finding -> finding.severity() != Severity.INFO)
+                    // Worst first, and among equals the first raised — findings are added in the
+                    // order they are checked, which puts the cause before its consequences.
+                    .max(Comparator.comparing(Finding::severity))
+                    .ifPresent(worst -> problems.add(new Headline(
+                            worst.severity(),
+                            job.name(),
+                            describe(worst.code()),
+                            worst.message(),
+                            job.pipelineId(),
+                            job.latest() == null ? null : job.latest().id().toString(),
+                            job.latest() == null ? null : job.latest().createdAt())));
         }
+        problems.sort(Comparator.comparing(Headline::severity).reversed());
 
-        headlines.sort(Comparator.comparingInt((Headline h) -> h.severity().ordinal()).reversed());
+        headlines.addAll(problems.stream().limit(TOP_HEADLINES).toList());
+        if (problems.size() > TOP_HEADLINES) {
+            headlines.add(new Headline(Severity.WARNING, null,
+                    (problems.size() - TOP_HEADLINES) + " more job"
+                            + (problems.size() - TOP_HEADLINES == 1 ? "" : "s") + " need attention",
+                    "Listed below, worst first.", null, null, null));
+        }
 
         // A run in flight is the one thing on this screen that changes while somebody watches it,
         // so it earns a line even when nothing is wrong.
         if (!live.isEmpty()) {
             headlines.add(new Headline(Severity.INFO,
-                    live.size() == 1
-                            ? live.get(0).pipeline() + " is running now"
-                            : live.size() + " jobs are running now",
+                    live.size() == 1 ? live.get(0).pipeline() : null,
+                    live.size() == 1 ? "Running now" : live.size() + " jobs running now",
                     live.stream().map(Live::pipeline).distinct().limit(3)
                             .reduce((a, b) -> a + ", " + b).orElse(""),
-                    null, live.size() == 1 ? live.get(0).runId() : null));
+                    null, live.size() == 1 ? live.get(0).runId() : null, null));
         }
 
         // The figure everybody is asked for, said rather than left to be added up.
         if (totals.recordsWritten() > 0) {
-            headlines.add(new Headline(Severity.INFO,
+            headlines.add(new Headline(Severity.INFO, null,
                     String.format("%,d records transferred in %s", totals.recordsWritten(), period),
                     String.format("across %d completed run%s%s", totals.completed(),
                             totals.completed() == 1 ? "" : "s",
                             totals.recordsFailed() > 0
                                     ? String.format(", with %,d not delivered", totals.recordsFailed())
                                     : " with nothing lost"),
-                    null, null));
+                    null, null, null));
         }
 
-        if (headlines.stream().noneMatch(h -> h.severity() != Severity.INFO)) {
-            headlines.add(0, new Headline(Severity.INFO, "Nothing has failed in " + period,
-                    "Every watched job ran, moved its usual volume, and lost nothing.", null, null));
+        if (problems.isEmpty()) {
+            headlines.add(0, new Headline(Severity.INFO, null, "Nothing has failed in " + period,
+                    "Every watched job ran, moved its usual volume, and lost nothing.",
+                    null, null, null));
         }
         return List.copyOf(headlines);
     }
 
+    /** What kind of problem this is, in the fewest words that stay true for every instance of it. */
+    private static String describe(String code) {
+        return switch (code) {
+            case "FAILED" -> "Last run failed";
+            case "UNACCOUNTED" -> "Lost records without reporting them";
+            case "DID_NOT_RUN" -> "Was due and never started";
+            case "NO_ROWS" -> "Ran but moved nothing";
+            case "VOLUME_LOW" -> "Moved far less than usual";
+            case "VOLUME_HIGH" -> "Moved far more than usual";
+            case "REJECTIONS" -> "Records did not reach the destination";
+            case "SLOW" -> "Took far longer than usual";
+            case "STUCK" -> "Has been running with nothing happening";
+            case "PAUSED_TOO_LONG" -> "Left paused, holding its slot";
+            default -> "Needs attention";
+        };
+    }
+
     /**
-     * @param headline a whole sentence, naming the job — read at a glance and often relayed verbatim
-     * @param detail   the figure or reason behind it, for whoever wants the next level down
+     * @param subject the job this is about, rendered as its own element rather than glued into the
+     *                sentence. Null for a line about the platform rather than one pipeline.
+     * @param at      when the run it describes started, so a headline carries its own age
      */
-    public record Headline(Severity severity, String headline, String detail, String pipelineId,
-                           String runId) {
+    public record Headline(Severity severity, String subject, String headline, String detail,
+                           String pipelineId, String runId, Instant at) {
     }
 
     /** Every watched pipeline, with its last run judged against its own history. */
