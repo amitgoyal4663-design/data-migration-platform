@@ -49,9 +49,11 @@ public class OperationsController {
                     """)
     public DashboardResponse dashboard(
             @Parameter(description = "How far back a run still counts as recent, in hours")
-            @RequestParam(defaultValue = "24") int hours) {
+            @RequestParam(defaultValue = "24") int hours,
+            @Parameter(description = "The watchlist only, or every pipeline that has been published")
+            @RequestParam(defaultValue = "true") boolean watched) {
 
-        var data = dashboard.dashboard(Duration.ofHours(Math.clamp(hours, 1, 24 * 30)));
+        var data = dashboard.dashboard(Duration.ofHours(Math.clamp(hours, 1, 24 * 30)), watched);
         var t = data.totals();
 
         return new DashboardResponse(
@@ -108,6 +110,9 @@ public class OperationsController {
     public record PipelineHealthResponse(
             String pipelineId,
             String name,
+            @Schema(description = "On the support desk's watchlist. False for a pipeline that "
+                    + "only appears because the scope was widened to every published one.")
+            boolean watched,
             @Schema(description = "The most recent real run. Null for a pipeline that has never "
                     + "run, which is itself worth seeing on a watchlist.")
             RunDtos.Response latest,
@@ -128,12 +133,16 @@ public class OperationsController {
             List<ReasonResponse> reasons,
             @Schema(description = "The last seven runs, newest first, for the trend beside today")
             List<AttemptResponse> trend,
-            ScheduleResponse schedule) {
+            ScheduleResponse schedule,
+            @Schema(description = "What this pipeline moved across the whole window, not on its "
+                    + "last run — the figure a product team asks for, which no single run holds")
+            VolumeResponse volume) {
 
         static PipelineHealthResponse from(OperationsDashboard.PipelineHealth health, Clock clock) {
             return new PipelineHealthResponse(
                     health.pipelineId(),
                     health.name(),
+                    health.watched(),
                     health.latest() == null
                             ? null : RunDtos.Response.from(health.latest(), clock.instant()),
                     health.typicalRows(),
@@ -150,8 +159,20 @@ public class OperationsController {
                     health.schedule() == null ? null : new ScheduleResponse(
                             health.schedule().name(), health.schedule().cron(),
                             health.schedule().timezone(), health.schedule().lastFiredAt(),
-                            health.schedule().nextDueAt()));
+                            health.schedule().nextDueAt()),
+                    new VolumeResponse(health.volume().runs(), health.volume().completed(),
+                            health.volume().failed(), health.volume().read(),
+                            health.volume().written(), health.volume().recordsFailed(),
+                            health.volume().seconds(), health.volume().successRate()));
         }
+    }
+
+    @Schema(name = "OperationsVolume")
+    public record VolumeResponse(int runs, int completed, int failed, long read, long written,
+                                 long recordsFailed, long seconds,
+                                 @Schema(description = "Of the runs that ended, the share that "
+                                         + "ended cleanly. Null when none has ended yet.")
+                                 Double successRate) {
     }
 
     @Schema(name = "OperationsFailureReason")

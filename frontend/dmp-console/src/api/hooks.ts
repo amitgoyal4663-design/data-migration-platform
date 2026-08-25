@@ -309,11 +309,29 @@ export function useSourceParameters(connectorInstanceId: string | undefined) {
  * Polled slowly and on purpose: nothing here changes second to second, and the query behind it
  * walks every watched pipeline's recent history.
  */
-export function useOperationsDashboard(refetchInterval: number) {
+/**
+ * @param hours how far back a run still counts as recent
+ * @param watched the support desk's watchlist, or every published pipeline
+ * @param refetchInterval milliseconds, or false to leave the screen still
+ *
+ * <p>Still is a real option. A screen that reorders itself under somebody mid-sentence is one they
+ * stop reading aloud to a colleague, and the reason to watch a dashboard live is rarely the same
+ * moment as the reason to study one.
+ */
+export function useOperationsDashboard(
+  hours: number,
+  watched: boolean,
+  refetchInterval: number | false,
+) {
   return useQuery({
-    queryKey: ['operations-dashboard'],
-    queryFn: () => api.get<OperationsDashboard>('/api/v1/operations/dashboard'),
+    queryKey: ['operations-dashboard', hours, watched],
+    queryFn: () =>
+      api.get<OperationsDashboard>(
+        `/api/v1/operations/dashboard?hours=${hours}&watched=${watched}`,
+      ),
     refetchInterval,
+    // Kept while the next window loads, so changing the range does not blank the page it replaces.
+    placeholderData: (previous) => previous,
   })
 }
 

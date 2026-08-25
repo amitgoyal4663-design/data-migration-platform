@@ -141,9 +141,24 @@ export interface OperationsFinding {
   detail: string | null
 }
 
+/** What one pipeline moved across the whole window, rather than on its last run. */
+export interface OperationsVolume {
+  runs: number
+  completed: number
+  failed: number
+  read: number
+  written: number
+  recordsFailed: number
+  seconds: number
+  /** Of the runs that ended, the share that ended cleanly. Null when none has. */
+  successRate: number | null
+}
+
 export interface PipelineHealth {
   pipelineId: string
   name: string
+  /** On the support desk's watchlist, as opposed to merely published. */
+  watched: boolean
   /** The most recent real run. Null for a watched pipeline that has never run. */
   latest: Run | null
   /** Median records read over recent completed runs. Null until there are enough to say anything. */
@@ -159,6 +174,7 @@ export interface PipelineHealth {
   /** The last seven runs, newest first. */
   trend: OperationsAttempt[]
   schedule: OperationsSchedule | null
+  volume: OperationsVolume
 }
 
 export interface OperationsLiveRun {

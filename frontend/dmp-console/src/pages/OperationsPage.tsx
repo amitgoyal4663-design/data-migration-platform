@@ -12,10 +12,29 @@ import Typography from '@mui/material/Typography'
 import CheckCircleIcon from '@mui/icons-material/CheckCircleOutlined'
 import ErrorIcon from '@mui/icons-material/ErrorOutlineOutlined'
 import WarningIcon from '@mui/icons-material/WarningAmberOutlined'
-import { Link as RouterLink } from 'react-router-dom'
-import { useOperationsDashboard } from '@/api/hooks'
+import MoreVertIcon from '@mui/icons-material/MoreVert'
+import PlayArrowIcon from '@mui/icons-material/PlayArrow'
+import StopIcon from '@mui/icons-material/Stop'
+import IconButton from '@mui/material/IconButton'
+import Menu from '@mui/material/Menu'
+import MenuItem from '@mui/material/MenuItem'
+import Tab from '@mui/material/Tab'
+import Tabs from '@mui/material/Tabs'
+import { useMemo, useState } from 'react'
+import { Link as RouterLink, useSearchParams } from 'react-router-dom'
+import {
+  useMonitorPipeline,
+  useOperationsDashboard,
+  useRunControl,
+  useStartRun,
+} from '@/api/hooks'
 import { ErrorPanel, Loading } from '@/components/Feedback'
+import { OperationsControls, applyFilters } from '@/components/OperationsControls'
+import type { OperationsFilters, SortOrder, StatusFilter } from '@/components/OperationsControls'
+import { OperationsEngineering } from '@/components/OperationsEngineering'
+import { OperationsProduct, ProductTotals } from '@/components/OperationsProduct'
 import { PageHeader } from '@/components/PageHeader'
+import { RunDialog } from '@/components/RunDialog'
 import { RunStateChip } from '@/components/StateChip'
 import { muted, tabular } from '@/theme'
 import type {
@@ -38,58 +57,152 @@ import type {
  * that matters most, why records failed, is a list of sentences, which is exactly what a table
  * cannot hold.
  */
-export function OperationsPage() {
-  const dashboard = useOperationsDashboard(30_000)
+type View = 'support' | 'product' | 'engineering'
 
-  if (dashboard.isLoading) return <Loading />
+const VIEWS: { value: View; label: string; caption: string }[] = [
+  {
+    value: 'support',
+    label: 'Support',
+    caption: 'Is anything wrong right now, and what do I do about it',
+  },
+  {
+    value: 'product',
+    label: 'Product',
+    caption: 'How much data moved, by pipeline, across the window',
+  },
+  {
+    value: 'engineering',
+    label: 'Engineering',
+    caption: 'The same window arranged by cause rather than by job',
+  },
+]
+
+export function OperationsPage() {
+  const [params, setParams] = useSearchParams()
+
+  // Read from the URL rather than from state, so a filtered screen is a link. Half of support work
+  // is one person showing another what they are looking at, and "failures first, last seven days,
+  // every pipeline" is not a sentence anybody wants to say out loud.
+  const view = (params.get('view') as View) || 'support'
+  const filters: OperationsFilters = {
+    hours: Number(params.get('hours')) || 24,
+    watched: params.get('scope') !== 'all',
+    search: params.get('q') ?? '',
+    status: (params.get('status') as StatusFilter) || 'all',
+    sort: (params.get('sort') as SortOrder) || 'worst',
+    live: params.get('live') !== '0',
+  }
+
+  const change = (next: Partial<OperationsFilters & { view: View }>) => {
+    const updated = new URLSearchParams(params)
+    const set = (key: string, value: string, fallback: string) =>
+      value === fallback ? updated.delete(key) : updated.set(key, value)
+
+    if (next.view !== undefined) set('view', next.view, 'support')
+    if (next.hours !== undefined) set('hours', String(next.hours), '24')
+    if (next.watched !== undefined) set('scope', next.watched ? 'watched' : 'all', 'watched')
+    if (next.search !== undefined) set('q', next.search, '')
+    if (next.status !== undefined) set('status', next.status, 'all')
+    if (next.sort !== undefined) set('sort', next.sort, 'worst')
+    if (next.live !== undefined) set('live', next.live ? '1' : '0', '1')
+    setParams(updated, { replace: true })
+  }
+
+  const dashboard = useOperationsDashboard(
+    filters.hours,
+    filters.watched,
+    filters.live ? 30_000 : false,
+  )
+
+  const shown = useMemo(
+    () => (dashboard.data ? applyFilters(dashboard.data.pipelines, filters) : []),
+    [dashboard.data, filters],
+  )
+
+  if (dashboard.isLoading && !dashboard.data) return <Loading />
   if (dashboard.error) return <ErrorPanel error={dashboard.error} />
   if (!dashboard.data) return null
 
   const { pipelines, watched, healthy, live, totals, headlines, generatedAt } = dashboard.data
-  const attention = pipelines.filter((pipeline) => !pipeline.healthy)
+  const attention = shown.filter((pipeline) => !pipeline.healthy)
 
   return (
     <>
       <PageHeader
         title="Operations"
-        subtitle={`${watched} job${watched === 1 ? '' : 's'} watched · ${healthy} normal · checked ${new Date(
-          generatedAt,
-        ).toLocaleTimeString()}`}
+        subtitle={`${watched} job${watched === 1 ? '' : 's'} · ${healthy} normal · ${
+          filters.live ? 'live, ' : ''
+        }checked ${new Date(generatedAt).toLocaleTimeString()}`}
       />
 
-      <Headlines headlines={headlines} />
-
-      <Highlights totals={totals} />
-
-      {live.length > 0 && <RunningNow runs={live} />}
-
-      <Box sx={{ mt: 3 }}>
-        {watched === 0 ? (
-          <Alert severity="info">
-            No jobs are being watched. Open a pipeline and press <strong>Watch</strong> to put it
-            here — a watchlist rather than everything, so the jobs somebody is accountable for do
-            not end up among the experiments.
-          </Alert>
-        ) : attention.length === 0 ? (
-          <Alert severity="success" icon={<CheckCircleIcon fontSize="inherit" />}>
-            All {healthy} watched job{healthy === 1 ? '' : 's'} ran, moved roughly what they
-            usually move, and lost nothing.
-          </Alert>
-        ) : (
-          <Alert severity={attention.some((p) => p.worst === 'CRITICAL') ? 'error' : 'warning'}>
-            <strong>
-              {attention.length} of {watched} need attention
-            </strong>{' '}
-            — {attention.map((pipeline) => pipeline.name).join(', ')}
-          </Alert>
-        )}
-      </Box>
-
-      <Stack spacing={2} sx={{ mt: 2 }}>
-        {pipelines.map((pipeline) => (
-          <JobCard key={pipeline.pipelineId} job={pipeline} />
+      <Tabs
+        value={view}
+        onChange={(_, next: View) => change({ view: next })}
+        sx={{ mb: 1, borderBottom: 1, borderColor: 'divider' }}
+      >
+        {VIEWS.map((entry) => (
+          <Tab key={entry.value} value={entry.value} label={entry.label} />
         ))}
-      </Stack>
+      </Tabs>
+      <Typography variant="body2" sx={{ color: muted, mb: 2 }}>
+        {VIEWS.find((entry) => entry.value === view)?.caption}
+      </Typography>
+
+      <OperationsControls
+        filters={filters}
+        onChange={change}
+        onRefresh={() => void dashboard.refetch()}
+        refreshing={dashboard.isFetching}
+        showing={shown.length}
+        total={pipelines.length}
+      />
+
+      {view === 'support' && (
+        <>
+          <Headlines headlines={headlines} />
+          <Highlights totals={totals} />
+          {live.length > 0 && <RunningNow runs={live} />}
+
+          <Box sx={{ mt: 3 }}>
+            {pipelines.length === 0 ? (
+              <Alert severity="info">
+                {filters.watched
+                  ? 'No jobs are being watched. Open a pipeline and press Watch to put it here — or switch Pipelines to "Every published" to see them all.'
+                  : 'No published pipelines have run in this window.'}
+              </Alert>
+            ) : shown.length === 0 ? (
+              <Alert severity="info">Nothing matches these filters.</Alert>
+            ) : attention.length === 0 ? (
+              <Alert severity="success" icon={<CheckCircleIcon fontSize="inherit" />}>
+                All {shown.length} job{shown.length === 1 ? '' : 's'} shown ran, moved roughly what
+                they usually move, and lost nothing.
+              </Alert>
+            ) : (
+              <Alert severity={attention.some((p) => p.worst === 'CRITICAL') ? 'error' : 'warning'}>
+                <strong>
+                  {attention.length} of {shown.length} need attention
+                </strong>{' '}
+                — {attention.map((pipeline) => pipeline.name).join(', ')}
+              </Alert>
+            )}
+          </Box>
+
+          <Stack spacing={2} sx={{ mt: 2 }}>
+            {shown.map((pipeline) => (
+              <JobCard key={pipeline.pipelineId} job={pipeline} />
+            ))}
+          </Stack>
+        </>
+      )}
+
+      {view === 'product' && (
+        <>
+          <ProductTotals pipelines={shown} />
+          <OperationsProduct pipelines={shown} />
+        </>
+      )}
+
+      {view === 'engineering' && <OperationsEngineering pipelines={shown} />}
     </>
   )
 }
@@ -252,6 +365,7 @@ function RunningNow({ runs }: { runs: OperationsLiveRun[] }) {
                 {run.recordsWritten.toLocaleString()} transferred · {formatSeconds(run.seconds)}
                 {run.progress !== null && ` · ${Math.round(run.progress * 100)}%`}
               </Typography>
+              <StopButton runId={run.runId} />
             </Box>
             <LinearProgress
               variant={run.progress === null ? 'indeterminate' : 'determinate'}
@@ -263,6 +377,132 @@ function RunningNow({ runs }: { runs: OperationsLiveRun[] }) {
       </Stack>
     </Paper>
   )
+}
+
+/**
+ * Stops a run from the screen it is being watched on.
+ *
+ * <p>Chunks already running finish their current batch, so the run stops somewhere it can resume
+ * from — which is why this is safe to offer beside a progress bar rather than behind two pages.
+ */
+function StopButton({ runId }: { runId: string }) {
+  const control = useRunControl(runId)
+  return (
+    <Tooltip title="Stop after the current batch">
+      <span>
+        <IconButton
+          size="small"
+          onClick={() => control.stop.mutate()}
+          disabled={control.stop.isPending}
+        >
+          <StopIcon fontSize="small" />
+        </IconButton>
+      </span>
+    </Tooltip>
+  )
+}
+
+/**
+ * What somebody does about a job, on the screen that told them about it.
+ *
+ * <p>The old card said what had happened and offered one link. Everything a support desk actually
+ * does next — run it again for one policy, rehearse it first, take it off the watchlist — meant
+ * finding the pipeline somewhere else, which is where the trail went cold.
+ */
+function JobActions({ job }: { job: PipelineHealth }) {
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null)
+  const [dialog, setDialog] = useState<'run' | 'dry' | null>(null)
+  const start = useStartRun()
+  const monitor = useMonitorPipeline()
+
+  return (
+    <>
+      <Tooltip title="Run this job">
+        <span>
+          <IconButton size="small" onClick={() => setDialog('run')}>
+            <PlayArrowIcon fontSize="small" />
+          </IconButton>
+        </span>
+      </Tooltip>
+      <IconButton size="small" onClick={(event) => setAnchor(event.currentTarget)}>
+        <MoreVertIcon fontSize="small" />
+      </IconButton>
+
+      <Menu anchorEl={anchor} open={Boolean(anchor)} onClose={() => setAnchor(null)}>
+        <MenuItem
+          onClick={() => {
+            setAnchor(null)
+            setDialog('dry')
+          }}
+        >
+          Dry run — read everything, write nothing
+        </MenuItem>
+        {job.latest && (
+          <MenuItem component={RouterLink} to={`/runs/${job.latest.id}`} onClick={() => setAnchor(null)}>
+            Open the latest run
+          </MenuItem>
+        )}
+        <MenuItem
+          component={RouterLink}
+          to={`/runs?pipelineId=${job.pipelineId}`}
+          onClick={() => setAnchor(null)}
+        >
+          Every run of this job
+        </MenuItem>
+        <MenuItem component={RouterLink} to={`/pipelines/${job.pipelineId}`} onClick={() => setAnchor(null)}>
+          Open the pipeline
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            setAnchor(null)
+            monitor.mutate({ id: job.pipelineId, watched: !job.watched })
+          }}
+        >
+          {job.watched ? 'Stop watching' : 'Watch this job'}
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            setAnchor(null)
+            void navigator.clipboard?.writeText(summarise(job))
+          }}
+        >
+          Copy a summary
+        </MenuItem>
+      </Menu>
+
+      <RunDialog
+        open={dialog !== null}
+        pipelineId={job.pipelineId}
+        pending={start.isPending}
+        dryRun={dialog === 'dry'}
+        onCancel={() => setDialog(null)}
+        onStart={(parameters, query) => {
+          start.mutate(
+            { pipelineId: job.pipelineId, parameters, query, dryRun: dialog === 'dry' },
+            { onSuccess: () => setDialog(null) },
+          )
+        }}
+      />
+    </>
+  )
+}
+
+/** The card as a paragraph, for the person who is going to paste it into a chat window. */
+function summarise(job: PipelineHealth): string {
+  const run = job.latest
+  const lines = [
+    `${job.name} — ${job.worst === 'INFO' ? 'normal' : job.worst.toLowerCase()}`,
+    run
+      ? `Last run ${run.state.toLowerCase()} at ${new Date(run.createdAt).toLocaleString()}: ` +
+        `${run.metrics.recordsRead.toLocaleString()} read, ` +
+        `${run.metrics.recordsWritten.toLocaleString()} transferred, ` +
+        `${run.metrics.recordsFailed.toLocaleString()} failed`
+      : 'Has never run',
+    ...job.findings.filter((f) => f.severity !== 'INFO').map((f) => `- ${f.message}`),
+    ...job.reasons.map((r) => `- ${r.count.toLocaleString()} ${r.reason}`),
+    run ? `${window.location.origin}/runs/${run.id}` : '',
+  ]
+  return lines.filter(Boolean).join('\n')
 }
 
 function JobCard({ job }: { job: PipelineHealth }) {
@@ -316,6 +556,7 @@ function JobCard({ job }: { job: PipelineHealth }) {
             </Button>
           </>
         )}
+        <JobActions job={job} />
       </Box>
 
       <Divider />

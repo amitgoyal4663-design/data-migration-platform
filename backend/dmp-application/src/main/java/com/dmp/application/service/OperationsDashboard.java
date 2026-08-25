@@ -125,11 +125,23 @@ public class OperationsDashboard {
      * screen that contradicts itself is one nobody trusts twice.
      */
     public Dashboard dashboard(Duration window) {
+        return dashboard(window, true);
+    }
+
+    /**
+     * @param watchedOnly the watchlist, or every pipeline that has run.
+     *
+     * <p>Two audiences read this screen and they do not want the same list. A support desk works
+     * from a watchlist somebody is accountable for, and an experiment appearing beside it is noise.
+     * A product team asking "did anything move yesterday" wants the ones nobody put on a list —
+     * that is where an unnoticed pipeline is, by definition.
+     */
+    public Dashboard dashboard(Duration window, boolean watchedOnly) {
         TenantId tenantId = tenantContext.currentTenant();
         Instant now = clock.instant();
         Instant since = now.minus(window);
 
-        List<PipelineHealth> health = today(window);
+        List<PipelineHealth> health = today(window, watchedOnly);
 
         // Running means running. findActive also returns PAUSED, because a paused run still holds
         // its slot — true for concurrency and wrong under a heading that says these are happening.
@@ -258,6 +270,11 @@ public class OperationsDashboard {
 
     /** Every watched pipeline, with its last run judged against its own history. */
     public List<PipelineHealth> today(Duration window) {
+        return today(window, true);
+    }
+
+    /** The same, over the watchlist or over every pipeline. See {@link #dashboard(Duration, boolean)}. */
+    public List<PipelineHealth> today(Duration window, boolean watchedOnly) {
         TenantId tenantId = tenantContext.currentTenant();
         Instant since = clock.instant().minus(window);
 
@@ -268,7 +285,11 @@ public class OperationsDashboard {
                         // the wrong problem.
                         new PageQuery(0, 200, "name", true))
                 .content().stream()
-                .filter(Pipeline::monitored)
+                .filter(pipeline -> !watchedOnly || pipeline.monitored())
+                // Unwatched, a pipeline earns its place by having run. Every draft somebody
+                // abandoned would otherwise arrive as a job that has never run, which is a true
+                // statement about a hundred rows nobody wants to read.
+                .filter(pipeline -> watchedOnly || pipeline.publishedVersionNumber().isPresent())
                 .toList();
 
         List<PipelineHealth> health = new ArrayList<>(watched.size());
@@ -347,9 +368,9 @@ public class OperationsDashboard {
                         run.duration(now()).map(Duration::toSeconds).orElse(0L)))
                 .toList();
 
-        return new PipelineHealth(pipeline.id().toString(), pipeline.name(), latest, typicalRows,
-                typicalSeconds, history.size(), List.copyOf(findings), reasons, trend,
-                scheduleSummary(tenantId, pipeline));
+        return new PipelineHealth(pipeline.id().toString(), pipeline.name(), pipeline.monitored(),
+                latest, typicalRows, typicalSeconds, history.size(), List.copyOf(findings), reasons,
+                trend, scheduleSummary(tenantId, pipeline), volume(recent, since));
     }
 
     /**
@@ -576,10 +597,62 @@ public class OperationsDashboard {
      * @param baselineRuns how many runs the comparison rests on. Shown, because a judgement from
      *                     three runs and one from ten deserve different amounts of belief.
      */
-    public record PipelineHealth(String pipelineId, String name, Run latest, Long typicalRows,
-                                 Long typicalSeconds, int baselineRuns, List<Finding> findings,
-                                 List<FailureReason> reasons, List<Attempt> trend,
-                                 ScheduleSummary schedule) {
+    /**
+     * What one pipeline moved over the chosen window, rather than on its last run.
+     *
+     * <p>The last run answers "is it broken". It does not answer "did we migrate the policies this
+     * week", which is the question a product team arrives with and which no single run can settle:
+     * seven runs of a nightly job are seven numbers, and the useful figure is their sum next to how
+     * many of them finished.
+     */
+    public record Volume(int runs, int completed, int failed, long read, long written,
+                         long recordsFailed, long seconds) {
+
+        /** Of the runs that reached an end, the share that reached a clean one. */
+        public Double successRate() {
+            int ended = completed + failed;
+            return ended == 0 ? null : (double) completed / ended;
+        }
+    }
+
+    /**
+     * Sums the runs that started inside the window.
+     *
+     * <p>By {@code createdAt} rather than by completion, so a run belongs to the window somebody
+     * asked about — a long job started last night and finished this morning is last night's work,
+     * and counting it today would make the same records appear in two windows.
+     */
+    private Volume volume(List<Run> recent, Instant since) {
+        int runs = 0;
+        int completed = 0;
+        int failed = 0;
+        long read = 0;
+        long written = 0;
+        long recordsFailed = 0;
+        long seconds = 0;
+
+        for (Run run : recent) {
+            if (run.dryRun() || run.createdAt().isBefore(since)) {
+                continue;
+            }
+            runs++;
+            if (run.state() == RunState.COMPLETED) {
+                completed++;
+            } else if (run.state() == RunState.FAILED) {
+                failed++;
+            }
+            read += run.metrics().recordsRead();
+            written += run.metrics().recordsWritten();
+            recordsFailed += run.metrics().recordsFailed();
+            seconds += run.duration(clock.instant()).map(Duration::toSeconds).orElse(0L);
+        }
+        return new Volume(runs, completed, failed, read, written, recordsFailed, seconds);
+    }
+
+    public record PipelineHealth(String pipelineId, String name, boolean watched, Run latest,
+                                 Long typicalRows, Long typicalSeconds, int baselineRuns,
+                                 List<Finding> findings, List<FailureReason> reasons,
+                                 List<Attempt> trend, ScheduleSummary schedule, Volume volume) {
 
         public Severity worst() {
             return findings.stream().map(Finding::severity)
