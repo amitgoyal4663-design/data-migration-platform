@@ -32,7 +32,6 @@ import { ErrorPanel, Loading } from '@/components/Feedback'
 import { OperationsControls, applyFilters } from '@/components/OperationsControls'
 import type { OperationsFilters, SortOrder, StatusFilter } from '@/components/OperationsControls'
 import { AlertBar, AlertsDrawer } from '@/components/OperationsAlerts'
-import { OperationsEngineering } from '@/components/OperationsEngineering'
 import { OperationsProduct, ProductTotals } from '@/components/OperationsProduct'
 import { PageHeader } from '@/components/PageHeader'
 import { RunDialog } from '@/components/RunDialog'
@@ -57,7 +56,7 @@ import type {
  * that matters most, why records failed, is a list of sentences, which is exactly what a table
  * cannot hold.
  */
-type View = 'support' | 'product' | 'engineering'
+type View = 'support' | 'product'
 
 const VIEWS: { value: View; label: string; caption: string }[] = [
   {
@@ -69,11 +68,6 @@ const VIEWS: { value: View; label: string; caption: string }[] = [
     value: 'product',
     label: 'Product',
     caption: 'How much data moved, by pipeline, across the window',
-  },
-  {
-    value: 'engineering',
-    label: 'Engineering',
-    caption: 'The same window arranged by cause rather than by job',
   },
 ]
 
@@ -214,7 +208,6 @@ export function OperationsPage() {
         </>
       )}
 
-      {view === 'engineering' && <OperationsEngineering pipelines={shown} />}
     </>
   )
 }
