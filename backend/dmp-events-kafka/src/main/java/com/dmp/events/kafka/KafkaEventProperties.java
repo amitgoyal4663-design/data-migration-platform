@@ -35,5 +35,23 @@ public record KafkaEventProperties(
          * <p>One partition is enough while execution is sequential: there is one slot in the fleet,
          * so ordering and parallelism across partitions buy nothing.
          */
-        @DefaultValue("dmp.work.available.v1") String nudgeTopic) {
+        @DefaultValue("dmp.work.available.v1") String nudgeTopic,
+
+        /**
+         * Where record-index entries are queued on their way to OpenSearch.
+         *
+         * <p>Its own topic because its retention is its own question. Run events are an outbound
+         * feed other systems keep; these are evidence in transit, worthless once indexed and
+         * urgently needed until then. Sharing a topic would mean choosing one retention for two
+         * unrelated requirements.
+         */
+        @DefaultValue("dmp.record.index.v1") String recordIndexTopic,
+
+        /**
+         * The consumer group that indexes them.
+         *
+         * <p>Shared across pods, unlike the work nudge's per-pod group: this is work to be divided,
+         * not a broadcast, and two pods indexing the same partition would duplicate every entry.
+         */
+        @DefaultValue("dmp-record-indexer") String recordIndexGroupId) {
 }
