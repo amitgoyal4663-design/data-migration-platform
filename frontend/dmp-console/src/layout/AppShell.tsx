@@ -12,7 +12,6 @@ import Stack from '@mui/material/Stack'
 import Toolbar from '@mui/material/Toolbar'
 import Tooltip from '@mui/material/Tooltip'
 import Typography from '@mui/material/Typography'
-import DashboardIcon from '@mui/icons-material/SpaceDashboardOutlined'
 import AccountTreeIcon from '@mui/icons-material/AccountTreeOutlined'
 import CableIcon from '@mui/icons-material/CableOutlined'
 import HistoryIcon from '@mui/icons-material/HistoryOutlined'
@@ -30,12 +29,11 @@ import { usePageChrome, useThemeMode } from '@/store'
 import { muted } from '@/theme'
 
 const NAV = [
-  { to: '/', label: 'Dashboard', Icon: DashboardIcon, exact: true },
+  { to: '/', label: 'Dashboard', Icon: MonitorHeartIcon, exact: true },
   { to: '/pipelines', label: 'Pipelines', Icon: AccountTreeIcon },
   { to: '/connectors', label: 'Connectors', Icon: CableIcon },
   { to: '/schedules', label: 'Schedules', Icon: ScheduleIcon },
   { to: '/notifications', label: 'Notifications', Icon: NotificationsIcon },
-  { to: '/operations', label: 'Operations', Icon: MonitorHeartIcon },
   { to: '/runs', label: 'Runs', Icon: HistoryIcon },
   { to: '/records', label: 'Find a record', Icon: SearchIcon },
   { to: '/audit', label: 'Audit trail', Icon: GavelIcon },

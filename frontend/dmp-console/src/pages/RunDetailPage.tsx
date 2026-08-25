@@ -53,7 +53,7 @@ import { StatTile } from '@/components/StatTile'
 import { RunSelection } from '@/components/RunSelection'
 import { ChunkStateChip, RunStateChip } from '@/components/StateChip'
 import { ErrorPanel, Loading } from '@/components/Feedback'
-import { formatDuration } from './DashboardPage'
+import { formatDuration } from '@/lib/duration'
 import { muted, tabular } from '@/theme'
 import { MoreOnScroll } from '@/components/MoreOnScroll'
 

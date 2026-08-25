@@ -1,6 +1,5 @@
-import { createBrowserRouter } from 'react-router-dom'
+import { Navigate, createBrowserRouter } from 'react-router-dom'
 import { AppShell } from './layout/AppShell'
-import { DashboardPage } from './pages/DashboardPage'
 import { PipelinesPage } from './pages/PipelinesPage'
 import { PipelineDetailPage } from './pages/PipelineDetailPage'
 import { DesignerPage } from './pages/DesignerPage'
@@ -18,14 +17,15 @@ export const router = createBrowserRouter([
     path: '/',
     element: <AppShell />,
     children: [
-      { index: true, element: <DashboardPage /> },
+      { index: true, element: <OperationsPage /> },
       { path: 'pipelines', element: <PipelinesPage /> },
       { path: 'pipelines/:pipelineId', element: <PipelineDetailPage /> },
       { path: 'pipelines/:pipelineId/versions/:versionId/design', element: <DesignerPage /> },
       { path: 'connectors', element: <ConnectorsPage /> },
       { path: 'schedules', element: <SchedulesPage /> },
       { path: 'notifications', element: <NotifiersPage /> },
-      { path: 'operations', element: <OperationsPage /> },
+      // Kept: a filtered operations view is a link somebody has already shared.
+      { path: 'operations', element: <Navigate to="/" replace /> },
       { path: 'runs', element: <RunsPage /> },
       { path: 'runs/:runId', element: <RunDetailPage /> },
       { path: 'records', element: <RecordSearchPage /> },
