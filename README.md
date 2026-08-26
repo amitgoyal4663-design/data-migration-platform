@@ -28,6 +28,18 @@ make stack
 First run is about ten minutes, nearly all of it compiling the backend and console. Later runs
 start in under a minute.
 
+It finishes with five connections, four published pipelines and a completed run already there, so
+the console opens on a working platform rather than eight empty screens and a Create button.
+
+**To move to the latest code later:**
+
+```bash
+make update
+```
+
+That is `git pull` and a rebuild in one step — because `git pull` on its own changes nothing that
+is running. The containers keep serving the code they were built from until they are rebuilt.
+
 | | |
 |---|---|
 | Console | http://localhost:3000 |

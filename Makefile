@@ -7,7 +7,7 @@ MVN      := cd backend && ./mvnw
 CONSOLE  := cd frontend/dmp-console && npm
 
 .DEFAULT_GOAL := help
-.PHONY: help up stack down reset logs ps build test verify run events console clean
+.PHONY: help up stack update seed down reset logs ps build test verify run events console clean
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -31,6 +31,9 @@ stack: ## Start EVERYTHING, including the app and the console. Only needs Docker
 	$(COMPOSE) up -d mongo
 	@$(COMPOSE) up mongo-init
 	$(COMPOSE) --profile full up -d --build
+	# Waits for the API to be healthy, then adds the connections and pipelines a new
+	# machine has none of. Idempotent, so a second `make stack` changes nothing.
+	@$(COMPOSE) --profile full up seed
 	@echo ""
 	@echo "  Console        http://localhost:3000"
 	@echo "  API docs       http://localhost:8080/swagger-ui.html"
@@ -40,6 +43,16 @@ stack: ## Start EVERYTHING, including the app and the console. Only needs Docker
 	@echo ""
 	@echo "  The API waits for Postgres, Mongo, OpenSearch and the Kafka topics."
 	@echo "  'make ps' shows dmp-app as healthy when it is genuinely ready."
+
+update: ## Get the latest code and restart on it
+	# The whole update in one target, because the alternative is a four-command recipe
+	# somebody half-remembers. `git pull` alone changes nothing that is running: the
+	# containers keep serving the code they were built from until they are rebuilt.
+	git pull --ff-only
+	$(MAKE) stack
+
+seed: ## Add the sample connections and pipelines (safe to repeat)
+	@$(COMPOSE) --profile full up seed
 
 down: ## Stop everything, keeping data
 	$(COMPOSE) --profile full down

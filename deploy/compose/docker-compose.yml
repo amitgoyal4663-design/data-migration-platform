@@ -314,6 +314,26 @@ services:
   # Here so the stack demonstrates something the moment it is up. Nothing in the
   # platform depends on it; delete the service and the platform is unchanged.
   # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # Creates the connections and pipelines a new machine has none of, then exits.
+  #
+  # Idempotent by name, so it is safe on every start: it adds what is missing and
+  # leaves everything else — including anything you built yourself — alone.
+  # ---------------------------------------------------------------------------
+  seed:
+    image: python:3.12-alpine
+    container_name: dmp-seed
+    profiles: ["full"]
+    depends_on:
+      app:
+        condition: service_healthy
+    volumes:
+      - ../seed:/seed:ro
+    environment:
+      DMP_API: http://app:8080
+    command: ["python", "/seed/seed.py"]
+    restart: "no"
+
   databricks-mock:
     build:
       context: ../../mocks/databricks

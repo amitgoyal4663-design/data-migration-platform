@@ -20,6 +20,13 @@ make stack
 The first run takes roughly ten minutes, almost all of it compiling the backend and the console
 inside their build images. Later runs start in under a minute.
 
+It ends by creating the sample connections and pipelines, so there is something to look at
+immediately. That step is idempotent — it adds only what is missing, and never touches anything
+you built yourself. `make seed` runs it again on demand.
+
+**Later, to move to the latest code:** `make update` — a `git pull` and a rebuild together, because
+a pull alone changes nothing that is running.
+
 When it finishes:
 
 | | |
