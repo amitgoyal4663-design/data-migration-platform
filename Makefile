@@ -31,7 +31,7 @@ require-compose:
 	  exit 1; }
 
 .DEFAULT_GOAL := help
-.PHONY: help require-compose up stack update seed down reset logs ps build test verify run events console clean
+.PHONY: help require-compose up stack restart update seed down reset logs ps build test verify run events console clean
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -77,6 +77,13 @@ update: ## Get the latest code and restart on it
 
 seed: require-compose ## Add the sample connections and pipelines (safe to repeat)
 	@$(COMPOSE) --profile full up seed
+
+restart: require-compose ## Stop and start everything again, keeping data and code as they are
+	# Deliberately not `up -d` on its own: Compose leaves a container alone when its
+	# image and config are unchanged, so a plain `up` after an edit to a mounted file
+	# or an env var appears to do nothing. Down-then-up always means what it says.
+	$(COMPOSE) --profile full down
+	$(MAKE) stack
 
 down: require-compose ## Stop everything, keeping data
 	$(COMPOSE) --profile full down
