@@ -31,7 +31,7 @@ services:
       # plan reproduced from production behaves the same on a developer's machine.
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     ports:
-      - "5432:5432"
+      - "${DMP_PORT_POSTGRES:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       # Creates the demo tables the migration walkthrough uses. Runs once, on an
@@ -65,7 +65,7 @@ services:
       # Host port 27018 so this does not collide with a MongoDB already running on the
       # machine. Inside the Compose network it is still mongo:27017, so nothing in the
       # application configuration changes — only how you reach it from outside.
-      - "27018:27017"
+      - "${DMP_PORT_MONGO:-27018}:27017"
     volumes:
       - mongo-data:/data/db
     healthcheck:
@@ -120,7 +120,7 @@ services:
     image: apache/kafka:3.9.0
     container_name: dmp-kafka
     ports:
-      - "9092:9092"
+      - "${DMP_PORT_KAFKA:-9092}:9092"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -153,7 +153,7 @@ services:
     image: redis:7-alpine
     container_name: dmp-redis
     ports:
-      - "6379:6379"
+      - "${DMP_PORT_REDIS:-6379}:6379"
     # No persistence, on purpose. If losing Redis breaks the platform, something is
     # stored here that should not be — and that should surface in development rather
     # than during an incident.
@@ -189,7 +189,7 @@ services:
       memlock: { soft: -1, hard: -1 }
       nofile: { soft: 65536, hard: 65536 }
     ports:
-      - "9200:9200"
+      - "${DMP_PORT_OPENSEARCH:-9200}:9200"
     volumes:
       - opensearch-data:/usr/share/opensearch/data
     healthcheck:
@@ -209,7 +209,7 @@ services:
       OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
       DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
     ports:
-      - "5601:5601"
+      - "${DMP_PORT_DASHBOARDS:-5601}:5601"
 
   # ---------------------------------------------------------------------------
   # The platform. Runs both roles under the `all` profile.
@@ -237,7 +237,7 @@ services:
       kafka-init:
         condition: service_completed_successfully
     ports:
-      - "8080:8080"
+      - "${DMP_PORT_API:-8080}:8080"
     environment:
       SPRING_PROFILES_ACTIVE: all
       # Record-index entries go to Kafka and a consumer indexes them, rather than each
@@ -358,7 +358,7 @@ services:
       # The customer API refuses any batch containing this string — a whole-call failure.
       MOCK_FAIL_INGEST_CONTAINING: ${MOCK_FAIL_INGEST_CONTAINING:-}
     ports:
-      - "8099:8099"
+      - "${DMP_PORT_MOCK:-8099}:8099"
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
@@ -391,7 +391,7 @@ services:
     depends_on:
       - app
     ports:
-      - "3000:80"
+      - "${DMP_PORT_CONSOLE:-3000}:80"
     restart: unless-stopped
 
 volumes:

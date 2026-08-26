@@ -38,6 +38,39 @@ When it finishes:
 
 `make down` stops it and keeps the data. `make reset` stops it and deletes the data.
 
+## If you already run a Postgres, Kafka or Elasticsearch
+
+Then some of these ports are taken, and Docker will refuse to start the container that wants one:
+
+```
+Error response from daemon: Bind for 0.0.0.0:9092 failed: port is already allocated
+```
+
+**Nothing of yours is at risk.** A refused bind is the whole of it — Docker never takes a port
+from whatever already holds it, and it never reaches the service behind it. This stack keeps its
+own volumes, its own network and its own `dmp-*` containers, and its services find each other by
+name inside that network rather than through your machine. Your data and this platform's data
+cannot see each other.
+
+To get past it, copy `deploy/compose/.env.example` to `deploy/compose/.env` and uncomment the
+ports that clash:
+
+```bash
+cp deploy/compose/.env.example deploy/compose/.env
+# then edit: DMP_PORT_KAFKA=19092, DMP_PORT_OPENSEARCH=19200, and so on
+make stack
+```
+
+`docker compose -f deploy/compose/docker-compose.yml ps` on a failed start names the offending
+service; `lsof -i :9092` names what already holds the port.
+
+Two things worth knowing before you change any of them:
+
+- **MongoDB is already published on 27018**, not 27017, so an existing local Mongo needs nothing.
+- **Only `DMP_PORT_CONSOLE` changes what you type in a browser.** The console reaches the API
+  through its own nginx, over the Docker network — so remapping the API port moves nothing but
+  the Swagger URL.
+
 ## What comes up
 
 Nine containers: Postgres (definitions), MongoDB (runs and chunks), OpenSearch (the record index
