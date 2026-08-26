@@ -97,8 +97,14 @@ public class ScheduledRunStarter {
                 // the period it was scheduled for, not one shifted by the delay.
                 JsonNode parameters = windowFor(schedule, scheduledFor);
 
+                // The query is named here rather than left to the orchestrator's default, which is
+                // whichever one the connection happens to declare first. A schedule reading a
+                // different query because somebody reordered a list on the connector screen is the
+                // kind of change nobody would look for at 3am. A null name still means the first
+                // one, which is what every schedule written before this field did.
                 Run run = orchestrator.start(schedule.pipelineId(), RunTrigger.SCHEDULED,
-                        schedule.idempotencyKeyFor(scheduledFor), parameters);
+                        schedule.idempotencyKeyFor(scheduledFor), parameters, false,
+                        schedule.queryName());
 
                 schedules.update(schedule.fired(clock.instant()));
                 log.info("Schedule '{}' started run {} of pipeline {}",

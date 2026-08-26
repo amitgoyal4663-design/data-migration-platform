@@ -87,7 +87,7 @@ public class ScheduleController {
     public ScheduleDtos.Response create(@Valid @RequestBody ScheduleDtos.CreateRequest request) {
         return withNextFire(schedules.create(
                 PipelineId.parse(request.pipelineId()), request.name(), request.cronExpression(),
-                request.windowScript(), request.timezone(), request.description()));
+                request.windowScript(), request.queryName(), request.timezone(), request.description()));
     }
 
     @PutMapping("/{scheduleId}")
@@ -95,7 +95,7 @@ public class ScheduleController {
                                         @Valid @RequestBody ScheduleDtos.UpdateRequest request) {
         return withNextFire(schedules.update(
                 ScheduleId.parse(scheduleId), request.name(), request.cronExpression(),
-                request.timezone(), request.windowScript(), request.description()));
+                request.timezone(), request.windowScript(), request.queryName(), request.description()));
     }
 
     @PostMapping("/{scheduleId}/enable")

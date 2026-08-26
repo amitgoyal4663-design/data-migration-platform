@@ -30,7 +30,8 @@ import { Link as RouterLink } from 'react-router-dom'
 import {
   useCreateSchedule,
   usePreviewWindow,
-  useRunParameterNames,
+  useRunParameters,
+  useRunQueries,
   useDeleteSchedule,
   usePipelines,
   useSchedules,
@@ -186,6 +187,16 @@ export function SchedulesPage() {
                     >
                       {pipelineName(schedule.pipelineId)}
                     </RouterLink>
+                    {/*
+                      Shown on the row, not just in the dialog. What an unattended job reads is the
+                      thing somebody is checking when they open this screen at all, and it should
+                      not require opening each schedule in turn to find out.
+                    */}
+                    {schedule.queryName && (
+                      <Typography variant="caption" component="div" sx={{ color: muted }}>
+                        {schedule.queryName}
+                      </Typography>
+                    )}
                   </TableCell>
 
                   <TableCell>
@@ -297,12 +308,21 @@ function ScheduleDialog({
     schedule ? (schedule.windowScript ?? '') : WINDOW_PRESETS[0].script,
   )
   const [description, setDescription] = useState(schedule?.description ?? '')
+  // Which query this schedule runs. Empty means the first one declared -- the old behaviour, kept
+  // for every schedule written before this field, and never silently rewritten to something else.
+  const [queryName, setQueryName] = useState(schedule?.queryName ?? '')
 
   const editingExisting = schedule !== null
 
   // What the chosen pipeline's query actually asks for. Everything about the script field follows
   // from this: whether to prefill it, what to suggest, and whether what it returns matches.
-  const expected = useRunParameterNames(pipelineId || undefined)
+  const queries = useRunQueries(pipelineId || undefined)
+  const queryNames = queries.data?.names ?? []
+
+  // Per query, not per pipeline. "By date range" wants a from and a to; "by order number" wants
+  // order numbers. Suggesting from/to for a schedule running the second would be suggesting values
+  // nothing binds.
+  const expected = useRunParameters(pipelineId || undefined, queryName || undefined)
   const expectedNames = expected.data?.names ?? []
 
   const mutation = editingExisting ? update : create
@@ -316,6 +336,7 @@ function ScheduleDialog({
       // Empty means no parameters, which is how every schedule behaved before window scripts
       // existed. Sending "" rather than null would store a script that returns nothing.
       windowScript: windowScript.trim() || null,
+      queryName: queryName || null,
       description: description || null,
     }
     if (editingExisting) {
@@ -353,6 +374,40 @@ function ScheduleDialog({
               {runnable.map((pipeline) => (
                 <MenuItem key={pipeline.id} value={pipeline.id}>
                   {pipeline.name} (v{pipeline.publishedVersion})
+                </MenuItem>
+              ))}
+            </TextField>
+          )}
+
+          {/*
+            Offered only when the source actually gives a choice. A connection with one query has
+            nothing to pick, and a select holding a single option is a decision presented where
+            none exists.
+
+            The empty option is not "none" — it is the first declared query, which is what a
+            schedule ran before it could name one. Saying so explicitly matters: the alternative
+            reading, that an unnamed schedule reads everything, is wrong and would be believed.
+          */}
+          {queryNames.length > 1 && (
+            <TextField
+              select
+              label="Query to run"
+              value={queryName}
+              onChange={(event) => setQueryName(event.target.value)}
+              size="small"
+              fullWidth
+              helperText={
+                queryName
+                  ? 'This schedule always runs this query, whatever the connection later makes its default'
+                  : `Follows the connection's default, currently "${queryNames[0]}" — it changes if somebody reorders the queries`
+              }
+            >
+              <MenuItem value="">
+                <em>The connection&rsquo;s default ({queryNames[0]})</em>
+              </MenuItem>
+              {queryNames.map((option) => (
+                <MenuItem key={option} value={option}>
+                  {option}
                 </MenuItem>
               ))}
             </TextField>

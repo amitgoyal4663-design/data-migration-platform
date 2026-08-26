@@ -32,6 +32,7 @@ import java.util.function.Supplier;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -67,7 +68,8 @@ class ScheduledRunStarterTest {
                 Clock.fixed(NOW, ZoneOffset.UTC));
 
         when(schedules.findAllEnabled()).thenReturn(List.of(schedule));
-        when(orchestrator.start(any(), any(), anyString(), any())).thenReturn(aRun());
+        when(orchestrator.start(any(), any(), anyString(), any(), anyBoolean(), any()))
+                .thenReturn(aRun());
 
         // The scheduler thread has no ambient tenant, so the work runs inside runAs. Executing the
         // supplier is what that does.
@@ -85,7 +87,8 @@ class ScheduledRunStarterTest {
     void startsARun() {
         starter.start(schedule.id(), DUE);
 
-        verify(orchestrator).start(eq(pipelineId), eq(RunTrigger.SCHEDULED), anyString(), any());
+        verify(orchestrator).start(eq(pipelineId), eq(RunTrigger.SCHEDULED), anyString(), any(),
+                anyBoolean(), any());
     }
 
     @Test
@@ -94,7 +97,7 @@ class ScheduledRunStarterTest {
         // From DUE, not from the clock: a pod starting twenty minutes late must still process the
         // period it was scheduled for rather than one shifted by the delay.
         Schedule windowed = Schedule.create(tenantId, pipelineId, "Nightly orders", "0 0 3 * * ?",
-                ZoneId.of("Asia/Kolkata"), "return { from: 'a', to: 'b' }", null, NOW);
+                ZoneId.of("Asia/Kolkata"), "return { from: 'a', to: 'b' }", null, null, NOW);
         when(schedules.findAllEnabled()).thenReturn(List.of(windowed));
         when(windowScript.evaluate(any(), eq(DUE), eq(ZoneId.of("Asia/Kolkata"))))
                 .thenReturn(java.util.Map.of("from", "a", "to", "b"));
@@ -103,7 +106,8 @@ class ScheduledRunStarterTest {
 
         ArgumentCaptor<com.fasterxml.jackson.databind.JsonNode> parameters =
                 ArgumentCaptor.forClass(com.fasterxml.jackson.databind.JsonNode.class);
-        verify(orchestrator).start(any(), any(), anyString(), parameters.capture());
+        verify(orchestrator).start(any(), any(), anyString(), parameters.capture(),
+                anyBoolean(), any());
 
         assertThat(parameters.getValue().path("from").asText()).isEqualTo("a");
         assertThat(parameters.getValue().path("to").asText()).isEqualTo("b");
@@ -117,9 +121,39 @@ class ScheduledRunStarterTest {
 
         ArgumentCaptor<com.fasterxml.jackson.databind.JsonNode> parameters =
                 ArgumentCaptor.forClass(com.fasterxml.jackson.databind.JsonNode.class);
-        verify(orchestrator).start(any(), any(), anyString(), parameters.capture());
+        verify(orchestrator).start(any(), any(), anyString(), parameters.capture(),
+                anyBoolean(), any());
 
         assertThat(parameters.getValue().isEmpty()).isTrue();
+    }
+
+    @Test
+    @DisplayName("runs the query the schedule names, not whichever is declared first")
+    void startsTheNamedQuery() {
+        // The defect this replaces: a schedule took whichever query the connection happened to
+        // declare first, so reordering that list -- or making a different query the default --
+        // silently changed what every schedule using that connection read overnight.
+        Schedule named = Schedule.create(tenantId, pipelineId, "By region nightly", "0 0 3 * * ?",
+                ZoneId.of("Asia/Kolkata"), null, "By region", null, NOW);
+        when(schedules.findAllEnabled()).thenReturn(List.of(named));
+
+        starter.start(named.id(), DUE);
+
+        ArgumentCaptor<String> query = ArgumentCaptor.forClass(String.class);
+        verify(orchestrator).start(any(), any(), anyString(), any(), anyBoolean(), query.capture());
+
+        assertThat(query.getValue()).isEqualTo("By region");
+    }
+
+    @Test
+    @DisplayName("a schedule naming no query still gets the first one, as it always did")
+    void noQueryNameKeepsTheOldBehaviour() {
+        starter.start(schedule.id(), DUE);
+
+        ArgumentCaptor<String> query = ArgumentCaptor.forClass(String.class);
+        verify(orchestrator).start(any(), any(), anyString(), any(), anyBoolean(), query.capture());
+
+        assertThat(query.getValue()).isNull();
     }
 
     @Test
@@ -138,7 +172,7 @@ class ScheduledRunStarterTest {
         starter.start(schedule.id(), DUE);
 
         ArgumentCaptor<String> key = ArgumentCaptor.forClass(String.class);
-        verify(orchestrator).start(any(), any(), key.capture(), any());
+        verify(orchestrator).start(any(), any(), key.capture(), any(), anyBoolean(), any());
 
         assertThat(key.getValue()).isEqualTo(schedule.idempotencyKeyFor(DUE));
         assertThat(key.getValue()).contains(String.valueOf(DUE.toEpochMilli()));

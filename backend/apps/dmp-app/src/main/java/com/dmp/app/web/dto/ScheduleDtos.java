@@ -28,6 +28,9 @@ public final class ScheduleDtos {
             @Schema(description = "JavaScript returning the values each run is started with, e.g. \"const to = fireTime.startOf('day'); return { from: to.minus({days: 1}), to }\". Leave empty to read whatever the query says.")
             String windowScript,
 
+            @Schema(description = "Which named query on the source connection this schedule runs. Empty means the first one declared, which is what every schedule did before this field existed.")
+            String queryName,
+
             String description) {
     }
 
@@ -38,6 +41,8 @@ public final class ScheduleDtos {
             @NotBlank String timezone,
             @Schema(description = "JavaScript returning the values each run is started with, e.g. \"const to = fireTime.startOf('day'); return { from: to.minus({days: 1}), to }\". Leave empty to read whatever the query says.")
             String windowScript,
+            @Schema(description = "Which named query on the source connection this schedule runs. Empty means the first one declared, which is what every schedule did before this field existed.")
+            String queryName,
             String description) {
     }
 
@@ -72,6 +77,7 @@ public final class ScheduleDtos {
             String cronExpression,
             String timezone,
             String windowScript,
+            String queryName,
             boolean enabled,
             String description,
 
@@ -94,6 +100,7 @@ public final class ScheduleDtos {
                     schedule.cronExpression(),
                     schedule.timezone().getId(),
                     schedule.windowScript(),
+                    schedule.queryName(),
                     schedule.enabled(),
                     schedule.description(),
                     schedule.lastFiredAt(),

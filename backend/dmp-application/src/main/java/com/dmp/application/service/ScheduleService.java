@@ -63,7 +63,7 @@ public class ScheduleService {
 
     @Transactional
     public Schedule create(PipelineId pipelineId, String name, String cronExpression,
-                           String windowScript,
+                           String windowScript, String queryName,
                            String timezone, String description) {
         TenantId tenantId = tenantContext.currentTenant();
         Instant now = clock.instant();
@@ -76,7 +76,8 @@ public class ScheduleService {
         }
 
         Schedule schedule = schedules.create(Schedule.create(
-                tenantId, pipelineId, name, cronExpression, zone(timezone), windowScript, description, now));
+                tenantId, pipelineId, name, cronExpression, zone(timezone), windowScript, queryName,
+                description, now));
 
         auditLog.record(AuditEntry.of(tenantId, tenantContext.currentActor(),
                 AuditAction.SCHEDULE_CHANGE, "schedule", schedule.id().toString(),
@@ -88,7 +89,7 @@ public class ScheduleService {
 
     @Transactional
     public Schedule update(ScheduleId id, String name, String cronExpression, String timezone,
-                           String windowScript,
+                           String windowScript, String queryName,
                            String description) {
         TenantId tenantId = tenantContext.currentTenant();
         Instant now = clock.instant();
@@ -96,7 +97,7 @@ public class ScheduleService {
         Schedule existing = require(tenantId, id);
         Schedule updated = schedules.update(existing
                 .renamed(name, description, now)
-                .withRule(cronExpression, zone(timezone), windowScript, now));
+                .withRule(cronExpression, zone(timezone), windowScript, queryName, now));
 
         auditLog.record(AuditEntry.of(tenantId, tenantContext.currentActor(),
                 AuditAction.SCHEDULE_CHANGE, "schedule", id.toString(),

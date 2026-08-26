@@ -43,6 +43,21 @@ public record Schedule(
          * schedule that existed before this.
          */
         String windowScript,
+        /**
+         * Which named query on the source connection this schedule runs, or null for the first
+         * one declared.
+         *
+         * <p>Named for the same reason a manual run names one. Without this a schedule took
+         * whichever query happened to be first, so what it read depended on the order of a list
+         * maintained on the connector screen — and reordering that list, or making a different
+         * query the default, silently repointed every schedule using that connection. A schedule
+         * that fires unattended at 3am is precisely the thing that must not change because of a
+         * click somewhere else.
+         *
+         * <p>Null is not an oversight and is not migrated away: it means the first declared query,
+         * which is what every schedule written before this did.
+         */
+        String queryName,
         boolean enabled,
         String description,
         Instant lastFiredAt,
@@ -79,28 +94,35 @@ public record Schedule(
     public static Schedule create(TenantId tenantId, PipelineId pipelineId, String name,
                                   String cronExpression, ZoneId timezone, String description,
                                   Instant now) {
-        return create(tenantId, pipelineId, name, cronExpression, timezone, null, description, now);
+        return create(tenantId, pipelineId, name, cronExpression, timezone, null, null,
+                description, now);
     }
 
     public static Schedule create(TenantId tenantId, PipelineId pipelineId, String name,
                                   String cronExpression, ZoneId timezone, String windowScript,
-                                  String description, Instant now) {
+                                  String queryName, String description, Instant now) {
         return new Schedule(ScheduleId.newId(), tenantId, pipelineId, name, cronExpression,
-                timezone, windowScript, true, description, null, now, now, 0L);
+                timezone, windowScript, queryName, true, description, null, now, now, 0L);
     }
 
     public Schedule withRule(String newCron, ZoneId newTimezone, Instant now) {
         return withRule(newCron, newTimezone, windowScript, now);
     }
 
+    public Schedule withRule(String newCron, ZoneId newTimezone, String newWindowScript,
+                             String newQueryName, Instant now) {
+        return new Schedule(id, tenantId, pipelineId, name, newCron, newTimezone, newWindowScript,
+                newQueryName, enabled, description, lastFiredAt, createdAt, now, rowVersion);
+    }
+
     public Schedule withRule(String newCron, ZoneId newTimezone, String newWindowScript, Instant now) {
         return new Schedule(id, tenantId, pipelineId, name, newCron, newTimezone, newWindowScript,
-                enabled, description, lastFiredAt, createdAt, now, rowVersion);
+                queryName, enabled, description, lastFiredAt, createdAt, now, rowVersion);
     }
 
     public Schedule renamed(String newName, String newDescription, Instant now) {
         return new Schedule(id, tenantId, pipelineId, newName, cronExpression, timezone,
-                windowScript, enabled, newDescription, lastFiredAt, createdAt, now, rowVersion);
+                windowScript, queryName, enabled, newDescription, lastFiredAt, createdAt, now, rowVersion);
     }
 
     /**
@@ -112,12 +134,12 @@ public record Schedule(
      */
     public Schedule enabled(boolean nowEnabled, Instant now) {
         return new Schedule(id, tenantId, pipelineId, name, cronExpression, timezone, windowScript,
-                nowEnabled, description, lastFiredAt, createdAt, now, rowVersion);
+                queryName, nowEnabled, description, lastFiredAt, createdAt, now, rowVersion);
     }
 
     public Schedule fired(Instant now) {
         return new Schedule(id, tenantId, pipelineId, name, cronExpression, timezone, windowScript,
-                enabled, description, now, createdAt, now, rowVersion);
+                queryName, enabled, description, now, createdAt, now, rowVersion);
     }
 
     public Optional<Instant> lastFired() {

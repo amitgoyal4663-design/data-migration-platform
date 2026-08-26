@@ -44,6 +44,9 @@ public class ScheduleEntity {
     @Column(name = "window_script", columnDefinition = "text")
     private String windowScript;
 
+    @Column(name = "query_name", columnDefinition = "text")
+    private String queryName;
+
     @Column(name = "enabled", nullable = false)
     private boolean enabled;
 
@@ -80,6 +83,9 @@ public class ScheduleEntity {
 
     public String getWindowScript() { return windowScript; }
     public void setWindowScript(String windowScript) { this.windowScript = windowScript; }
+
+    public String getQueryName() { return queryName; }
+    public void setQueryName(String queryName) { this.queryName = queryName; }
 
     public String getTimezone() { return timezone; }
     public void setTimezone(String timezone) { this.timezone = timezone; }

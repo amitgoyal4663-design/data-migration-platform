@@ -23,6 +23,7 @@ public final class ScheduleMapper {
                 entity.getCronExpression(),
                 ZoneId.of(entity.getTimezone()),
                 entity.getWindowScript(),
+                entity.getQueryName(),
                 entity.isEnabled(),
                 entity.getDescription(),
                 entity.getLastFiredAt(),
@@ -47,6 +48,7 @@ public final class ScheduleMapper {
         entity.setCronExpression(schedule.cronExpression());
         entity.setTimezone(schedule.timezone().getId());
         entity.setWindowScript(schedule.windowScript());
+        entity.setQueryName(schedule.queryName());
         entity.setEnabled(schedule.enabled());
         entity.setDescription(schedule.description());
         entity.setLastFiredAt(schedule.lastFiredAt());

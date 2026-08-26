@@ -763,6 +763,14 @@ export interface Schedule {
   timezone: string
   /** JavaScript computing the range each firing covers. Null means the whole query. */
   windowScript: string | null
+  /**
+   * Which named query on the source connection this schedule runs.
+   *
+   * Null means the first one declared — what every schedule did before this existed. It is not
+   * migrated away, because rewriting an unattended schedule to name a query would be guessing at
+   * an intent nobody recorded.
+   */
+  queryName: string | null
   enabled: boolean
   description: string | null
   lastFiredAt: string | null
@@ -778,6 +786,7 @@ export interface CreateScheduleRequest {
   cronExpression: string
   timezone: string
   windowScript?: string | null
+  queryName?: string | null
   description?: string | null
 }
 
@@ -786,6 +795,7 @@ export interface UpdateScheduleRequest {
   cronExpression: string
   timezone: string
   windowScript?: string | null
+  queryName?: string | null
   description?: string | null
 }
 
