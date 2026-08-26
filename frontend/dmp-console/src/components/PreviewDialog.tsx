@@ -2,6 +2,7 @@ import Alert from '@mui/material/Alert'
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
 import Dialog from '@mui/material/Dialog'
+import MenuItem from '@mui/material/MenuItem'
 import DialogActions from '@mui/material/DialogActions'
 import DialogContent from '@mui/material/DialogContent'
 import DialogTitle from '@mui/material/DialogTitle'
@@ -18,7 +19,7 @@ import Tabs from '@mui/material/Tabs'
 import Tooltip from '@mui/material/Tooltip'
 import Typography from '@mui/material/Typography'
 import { useEffect, useState } from 'react'
-import { usePreviewSource, useSourceParameters } from '@/api/hooks'
+import { usePreviewSource, useSourceParameters, useSourceQueries } from '@/api/hooks'
 import { ErrorPanel } from '@/components/Feedback'
 import { muted, tabular } from '@/theme'
 
@@ -49,12 +50,32 @@ export function PreviewDialog({
   onUseRecord?: (record: Record<string, unknown>) => void
 }) {
   const preview = usePreviewSource()
-  const parameters = useSourceParameters(open ? connectorInstanceId : undefined)
+  const queries = useSourceQueries(open ? connectorInstanceId : undefined)
+  const [query, setQuery] = useState('')
+  const parameters = useSourceParameters(open ? connectorInstanceId : undefined, query || undefined)
   const [view, setView] = useState(0)
   const [selected, setSelected] = useState(0)
   const [values, setValues] = useState<Record<string, string>>({})
 
+  const options = queries.data?.names ?? []
   const names = parameters.data?.names ?? []
+  const lists = parameters.data?.lists ?? []
+
+  // The first declared, which is the one a run gets when it names none — so what a preview shows
+  // by default is what a run would actually read. It previously showed neither: the connector was
+  // handed the raw configuration, so a connection whose selection lives in named queries had no
+  // selection here at all, and this returned the first ten rows of the whole collection.
+  useEffect(() => {
+    if (open && options.length > 0 && !query) {
+      setQuery(options[0] ?? '')
+    }
+  }, [open, options, query])
+
+  // Different query, different boxes. Carrying a value across would leave :from filled in on a
+  // query that has no from, and preview a selection nobody asked for.
+  useEffect(() => {
+    setValues({})
+  }, [query])
   const needsValues = names.some((name) => (values[name] ?? '').trim() === '')
 
   // Fetched on open rather than on mount: this makes a real call to somebody else's system, and a
@@ -64,9 +85,9 @@ export function PreviewDialog({
   useEffect(() => {
     if (!open || parameters.isLoading || needsValues) return
     setSelected(0)
-    preview.mutate({ connectorInstanceId, limit: 10, parameters: values })
+    preview.mutate({ connectorInstanceId, limit: 10, parameters: bind(values, names, lists), query })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, connectorInstanceId, parameters.isLoading])
+  }, [open, connectorInstanceId, parameters.isLoading, query])
 
   const data = preview.data
 
@@ -85,6 +106,24 @@ export function PreviewDialog({
 
       <DialogContent>
         <Stack spacing={2}>
+          {options.length > 0 && (
+            <TextField
+              select
+              label="Find records"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              size="small"
+              sx={{ maxWidth: 320 }}
+              helperText="The same queries a run picks from. A preview of one shows what that run would read."
+            >
+              {options.map((option) => (
+                <MenuItem key={option} value={option}>
+                  {option}
+                </MenuItem>
+              ))}
+            </TextField>
+          )}
+
           {names.length > 0 && (
             <Stack spacing={1.5}>
               <Typography variant="body2" sx={{ color: muted }}>
@@ -104,7 +143,13 @@ export function PreviewDialog({
                       setValues((current) => ({ ...current, [name]: event.target.value }))
                     }
                     size="small"
-                    placeholder="5000, or 2026-08-01T00:00:00Z"
+                    multiline={lists.includes(name)}
+                    minRows={lists.includes(name) ? 3 : undefined}
+                    placeholder={
+                      lists.includes(name)
+                        ? 'POL-44219\nPOL-91002'
+                        : '5000, or 2026-08-01T00:00:00Z'
+                    }
                     sx={{ flex: 1, minWidth: 180 }}
                   />
                 ))}
@@ -112,7 +157,12 @@ export function PreviewDialog({
                   variant="outlined"
                   disabled={needsValues || preview.isPending}
                   onClick={() =>
-                    preview.mutate({ connectorInstanceId, limit: 10, parameters: values })
+                    preview.mutate({
+                      connectorInstanceId,
+                      limit: 10,
+                      parameters: bind(values, names, lists),
+                      query,
+                    })
                   }
                 >
                   Read
@@ -281,4 +331,29 @@ function Cell({ value }: { value: unknown }) {
       </Box>
     </Tooltip>
   )
+}
+
+/**
+ * The typed values as the query wants them.
+ *
+ * <p>A placeholder inside {@code IN (…)} or {@code $in} takes several values; one string there
+ * matches a single literal containing commas, and matches nothing. Split the way the Run dialog
+ * splits them, so a preview and a run bind the same text identically.
+ */
+function bind(
+  values: Record<string, string>,
+  names: string[],
+  lists: string[],
+): Record<string, unknown> {
+  const bound: Record<string, unknown> = {}
+  for (const name of names) {
+    const raw = (values[name] ?? '').trim()
+    bound[name] = lists.includes(name)
+      ? raw
+          .split(/[\n,]/)
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+      : raw
+  }
+  return bound
 }

@@ -292,13 +292,24 @@ export function useTestTransform() {
  * Asked before previewing, so a parameterised source offers the right boxes rather than failing
  * with the connector's refusal — which is what it did, and which reads as a broken button.
  */
-export function useSourceParameters(connectorInstanceId: string | undefined) {
+export function useSourceParameters(connectorInstanceId: string | undefined, query?: string) {
   return useQuery({
-    queryKey: ['connector-parameters', connectorInstanceId],
+    queryKey: ['connector-parameters', connectorInstanceId, query],
     queryFn: () =>
-      api.get<{ names: string[] }>(
-        `/api/v1/connector-instances/${connectorInstanceId}/parameters`,
+      api.get<{ names: string[]; lists: string[] }>(
+        `/api/v1/connector-instances/${connectorInstanceId}/parameters` +
+          (query ? `?query=${encodeURIComponent(query)}` : ''),
       ),
+    enabled: Boolean(connectorInstanceId),
+  })
+}
+
+/** The named queries a connection offers, for the preview's picker. */
+export function useSourceQueries(connectorInstanceId: string | undefined) {
+  return useQuery({
+    queryKey: ['connector-queries', connectorInstanceId],
+    queryFn: () =>
+      api.get<{ names: string[] }>(`/api/v1/connector-instances/${connectorInstanceId}/queries`),
     enabled: Boolean(connectorInstanceId),
   })
 }
@@ -354,13 +365,17 @@ export function usePreviewSource() {
       connectorInstanceId,
       limit = 10,
       parameters,
+      query,
     }: {
       connectorInstanceId: string
       limit?: number
-      parameters?: Record<string, string>
+      parameters?: Record<string, unknown>
+      /** Which named query to preview. Omitted for the first declared — what a run gets. */
+      query?: string
     }) =>
       api.post<SourcePreview>(
-        `/api/v1/connector-instances/${connectorInstanceId}/preview?limit=${limit}`,
+        `/api/v1/connector-instances/${connectorInstanceId}/preview?limit=${limit}` +
+          (query ? `&query=${encodeURIComponent(query)}` : ''),
         parameters && Object.keys(parameters).length > 0 ? parameters : undefined,
       ),
   })

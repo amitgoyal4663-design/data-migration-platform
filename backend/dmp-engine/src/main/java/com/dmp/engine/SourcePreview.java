@@ -7,6 +7,7 @@ import com.dmp.connector.api.ConnectorContext;
 import com.dmp.connector.api.ConnectorException;
 import com.dmp.connector.api.DataRecord;
 import com.dmp.connector.api.Preparation;
+import com.dmp.connector.api.QueryVariants;
 import com.dmp.connector.api.Source;
 import com.dmp.connector.runtime.ConnectorContexts;
 import com.dmp.connector.runtime.ConnectorRegistry;
@@ -83,11 +84,51 @@ public class SourcePreview {
      * credential — the connector reads them out of its stored configuration.
      */
     public java.util.Set<String> parameterNames(ConnectorInstanceId id) {
+        return parameterNames(id, null);
+    }
+
+    /**
+     * The placeholders one of this connection's named queries expects.
+     *
+     * <p>Per query, for the same reason the run dialog asks per query: "by date range" wants a from
+     * and a to, "by policy number" wants a list, and a form asking for all three would be asking for
+     * values two of which cannot be used.
+     */
+    public java.util.Set<String> parameterNames(ConnectorInstanceId id, String query) {
         ConnectorInstance instance = instances.get(id);
         if (!connectors.require(instance.connectorType()).spec().direction().canRead()) {
             return java.util.Set.of();
         }
-        return connectors.source(instance.connectorType()).parameterNames(instance.config());
+        return connectors.source(instance.connectorType())
+                .parameterNames(QueryVariants.apply(instance.config(), resolve(instance, query)));
+    }
+
+    /** Which of those take a list, so the dialog offers a list rather than a single box. */
+    public java.util.Set<String> listParameterNames(ConnectorInstanceId id, String query) {
+        ConnectorInstance instance = instances.get(id);
+        if (!connectors.require(instance.connectorType()).spec().direction().canRead()) {
+            return java.util.Set.of();
+        }
+        return connectors.source(instance.connectorType())
+                .listParameterNames(QueryVariants.apply(instance.config(), resolve(instance, query)));
+    }
+
+    /** The named queries this connection offers, in the order they were written. */
+    public java.util.List<String> queryNames(ConnectorInstanceId id) {
+        return QueryVariants.names(instances.get(id).config());
+    }
+
+    /**
+     * The query a preview should run when none was named.
+     *
+     * <p>The first declared, which is what a run gets. A preview whose default differed from a
+     * run's would be the least useful thing this could be: a sample of records the pipeline will
+     * never read, shown to somebody about to write a mapping from it.
+     */
+    private static String resolve(ConnectorInstance instance, String query) {
+        return query == null || query.isBlank()
+                ? QueryVariants.defaultName(instance.config())
+                : query;
     }
 
     /**
@@ -99,6 +140,19 @@ public class SourcePreview {
      *                   from the one the pipeline will run
      */
     public Result read(ConnectorInstanceId id, int limit, JsonNode parameters) {
+        return read(id, limit, parameters, null);
+    }
+
+    /**
+     * Reads up to {@code limit} records using one of the connection's named queries.
+     *
+     * <p>The whole point of a preview is that it shows what a run would read. It did not: the
+     * connector was handed the instance's raw configuration, so a connection whose selection lives
+     * in named queries had no selection at all here, and the preview returned the first ten rows of
+     * the entire collection — records no run would ever touch, shown to somebody about to write a
+     * mapping from them.
+     */
+    public Result read(ConnectorInstanceId id, int limit, JsonNode parameters, String query) {
         ConnectorInstance instance = instances.get(id);
         int rows = Math.clamp(limit <= 0 ? DEFAULT_ROWS : limit, 1, MAX_ROWS);
 
@@ -109,8 +163,8 @@ public class SourcePreview {
         }
 
         Source source = connectors.source(instance.connectorType());
-        ConnectorContext context =
-                contexts.forInstance(instance, "preview", "console", parameters);
+        ConnectorContext context = contexts.forInstance(
+                instance, "preview", "console", parameters, resolve(instance, query));
 
         Instant startedAt = Instant.now();
         Preparation preparation = Preparation.none();
@@ -130,17 +184,17 @@ public class SourcePreview {
             // the source to produce a sample that looks like one place.
             Source.SplitSpec first = plan.get(0);
             List<JsonNode> records = new ArrayList<>(rows);
-            String query;
+            String describedRead;
 
             try (Source.RecordStream stream =
                          session.read(first, com.dmp.common.json.Json.emptyObject(), rows)) {
-                query = stream.describe();
+                describedRead = stream.describe();
                 DataRecord record;
                 while (records.size() < rows && (record = stream.next()) != null) {
                     records.add(record.payload());
                 }
             }
-            return new Result(List.copyOf(records), query, elapsed(startedAt),
+            return new Result(List.copyOf(records), describedRead, elapsed(startedAt),
                     records.size() == rows);
 
         } catch (ConnectorException e) {

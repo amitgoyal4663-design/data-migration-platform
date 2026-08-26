@@ -142,14 +142,31 @@ public class ConnectorInstanceController {
         return ConnectorInstanceDtos.Response.from(tester.test(ConnectorInstanceId.parse(id)));
     }
 
+    @GetMapping("/{id}/queries")
+    @Operation(summary = "The named queries this connection offers, in the order they were written",
+            description = "Empty for a connection that declares none, which is every one written "
+                    + "before they existed — a preview of those shows no picker, exactly as it did.")
+    public RunDtos.ParameterNames queries(@PathVariable String id) {
+        // The same shape the pipeline's own /queries returns, so the console has one reader.
+        return new RunDtos.ParameterNames(preview.queryNames(ConnectorInstanceId.parse(id)));
+    }
+
     @GetMapping("/{id}/parameters")
-    @Operation(summary = "The placeholders this source's query expects",
+    @Operation(summary = "The placeholders one of this source's queries expects",
             description = "So a preview can ask for exactly the right values instead of failing "
-                    + "with the connector's refusal. Empty for a query with no placeholders, "
-                    + "which is most of them. Costs no connection.")
-    public RunDtos.ParameterNames parameters(@PathVariable String id) {
+                    + "with the connector's refusal. Per query, because that is the point of "
+                    + "them: 'by date range' wants a from and a to, 'by policy number' wants a "
+                    + "list, and a form asking for all three asks for values two of which cannot "
+                    + "be used. Costs no connection.")
+    public RunDtos.ParameterNames parameters(
+            @PathVariable String id,
+            @Parameter(description = "Which named query. Omit for the first one declared, which "
+                    + "is what a run gets when it names none.")
+            @RequestParam(required = false) String query) {
+        ConnectorInstanceId instanceId = ConnectorInstanceId.parse(id);
         return new RunDtos.ParameterNames(
-                List.copyOf(preview.parameterNames(ConnectorInstanceId.parse(id))));
+                List.copyOf(preview.parameterNames(instanceId, query)),
+                List.copyOf(preview.listParameterNames(instanceId, query)));
     }
 
     @PostMapping("/{id}/preview")
@@ -178,6 +195,10 @@ public class ConnectorInstanceController {
             @PathVariable String id,
             @Parameter(description = "Rows to read. Capped at 100.")
             @RequestParam(defaultValue = "10") int limit,
+            @Parameter(description = "Which named query to preview. Omit for the first one "
+                    + "declared — the same one a run gets when it names none, so a preview shows "
+                    + "the records a run would actually read.")
+            @RequestParam(required = false) String query,
             @io.swagger.v3.oas.annotations.parameters.RequestBody(description =
                     "Values for a parameterised query, exactly as a run would supply them. A "
                             + "source reading WHERE ts > :from cannot be previewed without them.")
@@ -185,7 +206,7 @@ public class ConnectorInstanceController {
 
         return ConnectorInstanceDtos.PreviewResponse.from(
                 preview.read(ConnectorInstanceId.parse(id), limit,
-                        com.dmp.common.json.Json.orEmpty(parameters)));
+                        com.dmp.common.json.Json.orEmpty(parameters), query));
     }
 
     @PostMapping("/{id}/disable")
