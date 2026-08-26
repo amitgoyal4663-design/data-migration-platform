@@ -2,12 +2,36 @@
 # One entry point for the whole monorepo.
 # =============================================================================
 
-COMPOSE  := docker compose -f deploy/compose/docker-compose.yml
+# Compose ships two ways: as a `docker compose` subcommand (v2, current) and as a
+# standalone `docker-compose` binary (v1, still what a lot of installs have). Asking
+# Docker for the subcommand it does not have produces `unknown shorthand flag: 'f'`,
+# because the -f is then read as a flag to `docker` itself -- an error that names
+# nothing a person could act on. So the choice is made here, once.
+DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" \
+                     || (command -v docker-compose >/dev/null 2>&1 && echo "docker-compose"))
+
+COMPOSE  := $(DOCKER_COMPOSE) -f deploy/compose/docker-compose.yml
 MVN      := cd backend && ./mvnw
 CONSOLE  := cd frontend/dmp-console && npm
 
+# Checked before any target that needs it, so a missing Compose says so in one line
+# rather than failing somewhere inside a recipe.
+.PHONY: require-compose
+require-compose:
+	@test -n "$(DOCKER_COMPOSE)" || { \
+	  echo ""; \
+	  echo "  Docker Compose was not found."; \
+	  echo ""; \
+	  echo "  Neither 'docker compose' nor 'docker-compose' runs on this machine."; \
+	  echo "  Install Docker Desktop, which includes it:"; \
+	  echo "      https://www.docker.com/products/docker-desktop/"; \
+	  echo ""; \
+	  echo "  If Docker Desktop is installed, it is probably not started yet."; \
+	  echo ""; \
+	  exit 1; }
+
 .DEFAULT_GOAL := help
-.PHONY: help up stack update seed down reset logs ps build test verify run events console clean
+.PHONY: help require-compose up stack update seed down reset logs ps build test verify run events console clean
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -15,17 +39,17 @@ help: ## Show available targets
 
 # --------------------------------------------------------------- running things
 
-up: ## Start infrastructure only (run the app yourself from an IDE)
+up: require-compose ## Start infrastructure only (run the app yourself from an IDE)
 	$(COMPOSE) up -d postgres mongo kafka redis
 	@echo "Waiting for the MongoDB replica set to elect a primary..."
 	@$(COMPOSE) up mongo-init
 	@echo ""
 	@echo "  Postgres  localhost:5432   dmp / dmp"
-	@echo "  MongoDB   localhost:27017  replica set rs0"
+	@echo "  MongoDB   localhost:27018  replica set rs0"
 	@echo "  Kafka     localhost:9092"
 	@echo "  Redis     localhost:6379"
 
-stack: ## Start EVERYTHING, including the app and the console. Only needs Docker.
+stack: require-compose ## Start EVERYTHING, including the app and the console. Only needs Docker.
 	# mongo-init before the rest: the replica set has to elect a primary before anything
 	# connects to it, and a service that starts first simply fails and restarts in a loop.
 	$(COMPOSE) up -d mongo
@@ -51,19 +75,19 @@ update: ## Get the latest code and restart on it
 	git pull --ff-only
 	$(MAKE) stack
 
-seed: ## Add the sample connections and pipelines (safe to repeat)
+seed: require-compose ## Add the sample connections and pipelines (safe to repeat)
 	@$(COMPOSE) --profile full up seed
 
-down: ## Stop everything, keeping data
+down: require-compose ## Stop everything, keeping data
 	$(COMPOSE) --profile full down
 
-reset: ## Stop everything and DELETE all local data
+reset: require-compose ## Stop everything and DELETE all local data
 	$(COMPOSE) --profile full down -v
 
-logs: ## Tail logs from every service
+logs: require-compose ## Tail logs from every service
 	$(COMPOSE) --profile full logs -f
 
-ps: ## Show container status
+ps: require-compose ## Show container status
 	$(COMPOSE) --profile full ps
 
 # -------------------------------------------------------------------- building
@@ -89,7 +113,7 @@ run: ## Run the backend locally with both roles active, against the compose stac
 	DMP_KAFKA_BOOTSTRAP=localhost:9092 \
 	./mvnw -pl apps/dmp-app spring-boot:run -Dspring-boot.run.profiles=all
 
-events: ## Tail run events from Kafka (Ctrl-C to stop)
+events: require-compose ## Tail run events from Kafka (Ctrl-C to stop)
 	docker exec -it dmp-kafka /opt/kafka/bin/kafka-console-consumer.sh \
 		--bootstrap-server localhost:9092 \
 		--topic dmp.run.events.v1 --from-beginning --property print.key=true
